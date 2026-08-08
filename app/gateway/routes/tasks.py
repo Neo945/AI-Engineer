@@ -1,19 +1,24 @@
-"""Task run, listing, and detail endpoints."""
+"""Task run, listing, detail, and event-stream endpoints."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
-from collections.abc import Sequence
-from typing import Annotated
+from collections.abc import AsyncIterator, Sequence
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 
+from app.database.models.enums import TaskStatus
+from app.database.models.message import Message
 from app.database.models.session import Session
 from app.database.models.task import Task
 from app.database.repositories.message import MessageRepository
 from app.database.repositories.session import SessionRepository
 from app.database.repositories.task import TaskRepository
-from app.gateway.dependencies import OrchestratorDep, SessionDep
+from app.gateway.dependencies import EventBrokerDep, OrchestratorDep, SessionDep
 from app.gateway.schemas import (
     MessageResponse,
     TaskCreateRequest,
@@ -22,6 +27,10 @@ from app.gateway.schemas import (
 )
 
 router = APIRouter(tags=["tasks"])
+
+_SSE_KEEPALIVE_SECONDS = 15.0
+
+_TERMINAL_STATUSES = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED})
 
 
 async def get_session_or_404(session_id: uuid.UUID, db: SessionDep) -> Session:
@@ -42,27 +51,29 @@ SessionOr404Dep = Annotated[Session, Depends(get_session_or_404)]
 @router.post(
     "/sessions/{session_id}/tasks",
     response_model=TaskResponse,
-    status_code=201,
+    status_code=202,
 )
 async def create_and_run_task(
     session_id: uuid.UUID,
     body: TaskCreateRequest,
+    background_tasks: BackgroundTasks,
     db: SessionDep,
     session: SessionOr404Dep,
     orchestrator: OrchestratorDep,
 ) -> Task:
-    """Create a task for a session and run it to completion inline.
+    """Create a task for a session and kick off its run in the background.
 
-    The request blocks until the agent finishes; clients can poll
-    ``GET /tasks/{task_id}`` afterwards for the persisted transcript.
+    The response is returned as soon as the task is created (status
+    ``pending``); the agent then executes asynchronously. Clients can watch
+    progress on ``GET /sessions/{session_id}/tasks/{task_id}/events`` (SSE)
+    or poll ``GET /tasks/{task_id}`` for the persisted transcript.
     """
     task = await TaskRepository(db).add(
         Task(session_id=session_id, agent_type=body.agent_type, goal=body.goal)
     )
     await db.commit()
 
-    await orchestrator.run_task(task.id)
-    await db.refresh(task)
+    background_tasks.add_task(orchestrator.run_task, task.id)
     return task
 
 
@@ -92,3 +103,79 @@ async def get_task_detail(
         **TaskResponse.model_validate(task).model_dump(),
         messages=[MessageResponse.model_validate(message) for message in messages],
     )
+
+
+@router.get("/sessions/{session_id}/tasks/{task_id}/events")
+async def stream_task_events(
+    session_id: uuid.UUID,
+    task_id: uuid.UUID,
+    db: SessionDep,
+    session: SessionOr404Dep,
+    broker: EventBrokerDep,
+) -> StreamingResponse:
+    """Stream a task's progress as Server-Sent Events.
+
+    The stream opens by replaying the current task snapshot and persisted
+    transcript, then emits each new status transition and message live until
+    the task reaches a terminal state, at which point the stream closes.
+    DB state is the source of truth; broker events only wake the streamer so
+    updates arrive promptly rather than on a poll interval.
+    """
+    task = await TaskRepository(db).get(task_id)
+    if task is None or task.session_id != session_id:
+        raise HTTPException(status_code=404, detail="task not found")
+
+    queue = await broker.subscribe(task_id)
+
+    async def _stream() -> AsyncIterator[str]:
+        last_ordinal = -1
+        seen_status: TaskStatus | None = None
+        try:
+            while True:
+                current = await TaskRepository(db).get(task_id)
+                messages = await MessageRepository(db).list_by_task(task_id)
+
+                if current is not None and current.status != seen_status:
+                    seen_status = current.status
+                    yield _sse_frame("snapshot", _task_payload(current))
+
+                for message in messages:
+                    if message.ordinal <= last_ordinal:
+                        continue
+                    yield _sse_frame("message", _message_payload(message))
+                    last_ordinal = message.ordinal
+
+                if current is None or current.status in _TERMINAL_STATUSES:
+                    if current is not None:
+                        yield _sse_frame(current.status.value, _task_payload(current))
+                    break
+
+                await db.commit()
+                try:
+                    await asyncio.wait_for(queue.get(), timeout=_SSE_KEEPALIVE_SECONDS)
+                except TimeoutError:
+                    yield ": keepalive\n\n"
+        finally:
+            await broker.unsubscribe(task_id, queue)
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+def _task_payload(task: Task) -> dict[str, Any]:
+    return TaskResponse.model_validate(task).model_dump(mode="json")
+
+
+def _message_payload(message: Message) -> dict[str, Any]:
+    return MessageResponse.model_validate(message).model_dump(mode="json")
+
+
+def _sse_frame(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"

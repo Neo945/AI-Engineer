@@ -221,3 +221,75 @@ async def test_agent_can_be_seeded_with_existing_transcript() -> None:
 
     assert result.answer == "Continuing."
     assert len(fake.calls[0]["messages"]) == 2  # goal + prior message
+
+
+async def test_agent_streams_each_message_to_on_message_hook() -> None:
+    stub = _StubExecutor()
+    executor = cast(ToolExecutor, stub)
+    request = ToolRequest(name="file_read", arguments={"path": "x.py"})
+    fake = FakeLLM(
+        [
+            _tool_response(requests=[request]),
+            _final_response("Read x.py: done."),
+        ]
+    )
+    streamed: list[ChatMessage] = []
+    agent = CoderAgent(
+        llm=fake,
+        executor=executor,
+        on_message=lambda message: streamed.append(message),
+    )
+
+    await agent.run("Fix the bug")
+
+    assert [message.role for message in streamed] == [
+        ChatRole.USER,
+        ChatRole.ASSISTANT,
+        ChatRole.TOOL,
+        ChatRole.ASSISTANT,
+    ]
+    assert streamed[0].content == "Fix the bug"
+    assert streamed[1].tool_requests[0].name == "file_read"
+    assert streamed[2].content == "42"
+    assert streamed[2].tool_call_id == request.id
+    assert streamed[3].content == "Read x.py: done."
+
+
+async def test_agent_streams_unknown_tool_message() -> None:
+    executor = cast(ToolExecutor, _StubExecutor())
+    bogus = ToolRequest(name="not_a_real_tool", arguments={})
+    fake = FakeLLM(
+        [
+            _tool_response(requests=[bogus]),
+            _final_response("I could not run that."),
+        ]
+    )
+    streamed: list[ChatMessage] = []
+    agent = CoderAgent(
+        llm=fake,
+        executor=executor,
+        on_message=lambda message: streamed.append(message),
+    )
+
+    await agent.run("Do something")
+
+    tool_message = streamed[2]
+    assert tool_message.role == ChatRole.TOOL
+    assert "unknown tool" in tool_message.content
+
+
+async def test_agent_invokes_async_on_message_hook() -> None:
+    executor = cast(ToolExecutor, _StubExecutor())
+    fake = FakeLLM([_final_response("Done.")])
+    streamed: list[ChatMessage] = []
+
+    async def _collect(message: ChatMessage) -> None:
+        streamed.append(message)
+
+    agent = CoderAgent(llm=fake, executor=executor, on_message=_collect)
+    await agent.run("Do it")
+
+    assert [message.role for message in streamed] == [
+        ChatRole.USER,
+        ChatRole.ASSISTANT,
+    ]

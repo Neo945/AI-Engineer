@@ -1,6 +1,7 @@
 # Low-Level Design (LLD) — coding-agent
 
-Version 1.0 · applies to the current implementation (Phases 1–5, commit `c46f461`)
+Version 1.1 · applies to the current implementation (Phases 1–6, includes
+streaming events over SSE)
 
 Companion to [HLD.md](HLD.md). This document specifies the concrete
 structure: packages, classes with their public interfaces, the database
@@ -227,47 +228,75 @@ CoderState(TypedDict, total=False)
 
 CoderResult(answer, messages, input_tokens, output_tokens, steps)
 
-CoderAgent(llm, executor, system_prompt=None, max_steps=8, max_tokens=4096, temperature=0.0)
+CoderAgent(llm, executor, system_prompt=None, max_steps=8, max_tokens=4096,
+           temperature=0.0, on_message=None)
   async run(goal, initial_messages=()) -> CoderResult
   # graph: START → coder(_step) → {continue: coder, end: END} via _route
   async _step(state) -> dict   # LLM call; branches on tool_requests
   async _execute_tool(request) -> ChatMessage   # unknown tool → TOOL msg
   _route(state) -> "continue" | "end"
+  _invoke_on_message(message)   # fires on_message (sync or async) for goal,
+                                # every assistant turn, and every tool result
 format_tool_result(result) -> str   # output; "[error] detail"; "(tool X returned no output)"
 ```
 
 Loop semantics: state reducer `operator.add` **accumulates** `messages` and
 token counts across steps; `final_answer` is the content of the last
 assistant message; `steps` increments per LLM call; `_route` stops when
-`continue_loop` is false or `step >= max_steps`.
+`continue_loop` is false or `step >= max_steps`. When `on_message` is set it
+is invoked in transcript order for the seeded goal message, each assistant
+message, and each tool result (including the `unknown tool` response), so a
+caller can persist/stream each entry as it is produced.
 
 ### 3.6 Orchestrator — `app/orchestrator/orchestrator.py`
 
 ```
-EventKind = Literal["started","completed","failed"]
-OrchestratorEvent(task_id, kind, message: ChatMessage|None = None, detail: str|None = None)
-  # frozen dataclass; emitted to on_event callback (sync or async)
+EventKind = Literal["started","message","completed","failed"]
+OrchestratorEvent(task_id, kind, message: ChatMessage|None = None,
+                  detail: str|None = None, ordinal: int|None = None)
+  # frozen dataclass; "message" events carry the persisted entry + its ordinal
 
-Orchestrator(session_factory, llm, settings, on_event=None, executor_factory=None)
+Orchestrator(session_factory, llm, settings, on_event=None,
+             event_broker=None, executor_factory=None)
   async run_task(task_id) -> Task
   #   1. get_for_run (eager session+workspace) else ValueError
   #   2. emit "started"; status=RUNNING; started_at=now; commit
   #   3. executor = executor_factory(workspace_dir) | ToolExecutor.build(...)
-  #   4. agent = CoderAgent(llm, executor, max_tokens, temperature)
-  #   5. try: result = await agent.run(task.goal)
+  #   4. ordinal_base = max_ordinal(session)   # -1 for an empty session
+  #   5. _append(msg): ordinal_base+=1; persist Message(ordinal); commit;
+  #        emit "message" event          ← CoderAgent.on_message hook
+  #   6. agent = CoderAgent(llm, executor, max_tokens, temperature, on_message=_append)
+  #   7. try: result = await agent.run(task.goal)
   #        except Exception → _fail (status=FAILED, error, finished_at, emit "failed")
-  #   6. persist transcript (ordinal base = max_ordinal+1)
-  #   7. status=COMPLETED; result=answer; tokens; finished_at; commit
-  #   8. emit "completed"
+  #   8. status=COMPLETED; result=answer; tokens; finished_at; commit
+  #   9. emit "completed"
   _fail(session, task, exc) -> Task
-  _persist_transcript(session, task, messages) -> None
+  _persist_message(session, task, message, ordinal) -> None   # + commit
   _serialize_tool_calls(requests) -> list[dict]|None    # model_dump per request
-  _emit(event) -> None
+  _emit(event) -> None   # publish to event_broker (best-effort), then on_event
 ```
 
 Semantics: failed runs are **not raised** — the task carries the error so
-polling clients get a uniform story. `MessageRole(message.role.value)`
+polling clients get a uniform story. The transcript is persisted **per
+message with an immediate commit** (rather than batched at the end), so each
+entry is durably visible to concurrent readers while the task is still
+running; a failure therefore keeps the partial transcript. `MessageRole(message.role.value)`
 bridges ChatRole → MessageRole (same values).
+
+### EventBroker — `app/orchestrator/broker.py`
+
+```
+EventBroker  # in-process pub/sub, the single-process stand-in for Redis
+  _subscribers: dict[uuid.UUID, set[asyncio.Queue[OrchestratorEvent]]]
+  _lock: asyncio.Lock
+  async subscribe(task_id) -> asyncio.Queue       # new queue for the task
+  async unsubscribe(task_id, queue) -> None       # idempotent; cleans empty sets
+  async publish(event) -> None  # put_nowait to each subscriber; QueueFull dropped
+```
+
+One shared instance lives on the `Container` and is passed to the
+orchestrator and exposed to routes via `EventBrokerDep`. Publishing is
+best-effort so a lagging subscriber never blocks the agent.
 
 ### 3.7 Gateway
 
@@ -275,28 +304,41 @@ bridges ChatRole → MessageRole (same values).
 dependencies.py
   get_container(request) -> Container
   async get_db_session(container) -> AsyncIterator[AsyncSession]
+  get_event_broker(container) -> EventBroker          # shared broker
   get_orchestrator(container) -> Orchestrator   # 503 "LLM is not configured" on any build error
-  ContainerDep / SessionDep / OrchestratorDep
+  ContainerDep / SessionDep / EventBrokerDep / OrchestratorDep
 
 routes/tasks.py
   async get_session_or_404(session_id, db) -> Session    # 404 dependency
-  POST /sessions/{session_id}/tasks   → 201 TaskResponse
+  POST /sessions/{session_id}/tasks   → 202 TaskResponse
        body TaskCreateRequest{goal 1..4000, agent_type default "coder"}
-       create task (PENDING) → commit → orchestrator.run_task → db.refresh(task) → return
+       create task (PENDING) → commit →
+         BackgroundTasks.add_task(orchestrator.run_task, task.id) → return
   GET  /sessions/{session_id}/tasks   → list[TaskResponse]  (limit 1..500, offset ≥ 0)
   GET  /tasks/{task_id}               → TaskDetailResponse (task + ordered transcript)
+  GET  /sessions/{session_id}/tasks/{task_id}/events → text/event-stream
+       replay (snapshot on status change + persisted messages) then live,
+       15s keepalive comments, closes on a terminal status (completed/failed/
+       cancelled). DB is the source of truth; broker events only wake the loop.
 
 schemas.py
   TaskCreateRequest; TaskResponse(from_attributes); MessageResponse(from_attributes);
   TaskDetailResponse(TaskResponse + messages: list[MessageResponse])
 ```
 
-Two subtle behaviors (enforced by tests):
-- `db.refresh(task)` after `run_task` is mandatory because the session
-  factory uses `expire_on_commit=False`.
+SSE frame format: `event: snapshot|message|completed|failed\n` + `data: {json}`.
+`snapshot`/terminal frames carry a full `TaskResponse`; `message` frames
+carry a full `MessageResponse`. Headers: `text/event-stream`, `Cache-Control:
+no-cache`, `X-Accel-Buffering: no`.
+
+Subtle behaviors (enforced by tests):
 - `get_session_or_404` is declared **before** `OrchestratorDep` so a missing
   session returns `404` even when the LLM is unconfigured (dependencies
   resolve in declaration order; otherwise 503 would shadow 404).
+- The orchestrator runs in the background with its own session factory, so
+  the request-scoped `db` session is never shared across the response
+  boundary; `expire_on_commit=False` keeps the created task readable after
+  the commit.
 
 ### 3.8 Tools — `app/tools/`
 
@@ -362,31 +404,31 @@ sandbox.py
 
 ## 4. Sequence diagrams
 
-### 4.1 Create + run task
+### 4.1 Create + run task (async, streamed)
 
 ```
-Client  Gateway  Orchestrator  CoderAgent  LLM  ToolExecutor  Sandbox  Postgres
-  │ POST  │            │           │         │       │          │        │
-  ├──────▶│ 404 if no session        │         │       │          │        │
-  │       ├──── add Task(PENDING) ─────────────────────────────────────────▶│
-  │       ├──── commit ────────────────────────────────────────────────────▶│
-  │       │   run_task(task_id)      │         │       │          │        │
-  │       │──▶│ get_for_run (eager) ───────────────────────────────────────▶│
-  │       │   │ status=RUNNING ────────────────────────────────────────────▶│
-  │       │   │ build executor ──────▶┐        │       │          │        │
-  │       │   │ build agent ──────────▶│        │       │          │        │
-  │       │   │  run(goal)  ──────────▶│        │       │          │        │
-  │       │   │    complete(msgs, tools) ──────▶│       │          │        │
-  │       │   │    tool_requests  ◀─────────────│       │          │        │
-  │       │   │    execute(ToolCall) ────────────────▶│  get_or_start/run  │
-  │       │   │    TOOL message ◀─────────────────────│◀──────────│        │
-  │       │   │    complete(msgs+tool) ───────────▶│       │          │        │
-  │       │   │    final answer ◀──────────────────│       │          │        │
-  │       │   │  result.messages ◀────────────────│       │          │        │
-  │       │   │ persist transcript (ordinals) ────────────────────────────▶│
-  │       │   │ status=COMPLETED ─────────────────────────────────────────▶│
-  │       │──│  201 TaskResponse                                               │
-  │◀──────│   │                                                                │
+Client  Gateway  Orchestrator  CoderAgent  LLM  ToolExecutor  Sandbox  Postgres  Broker
+  │ POST  │            │           │         │       │          │        │       │
+  ├──────▶│ 404 if no session        │         │       │          │        │       │
+  │       ├──── add Task(PENDING) ────────────────────────────────────────▶│       │
+  │       ├──── commit ───────────────────────────────────────────────────▶│       │
+  │       │   BackgroundTasks.run_task(task_id)     │         │          │       │
+  │       │   (response sent; client opens SSE)     │         │          │       │
+  │◀──────│  202 TaskResponse                       │         │          │       │
+  │       │ run_task(task_id)                       │         │          │       │
+  │       │──▶│ get_for_run (eager) ──────────────────────────────────────▶│       │
+  │       │   │ status=RUNNING ───────────────────────────────────────────▶│       │
+  │       │   │ ordinal_base = max_ordinal ───────────────────────────────▶│       │
+  │       │   │ agent.run(goal) ──────────▶│         │          │         │       │
+  │       │   │   on_message(goal)  ──────▶│ persist+commit (ordinal) ───▶│ emit ▶│
+  │       │   │   complete(msgs, tools) ─────────▶│       │          │     │       │
+  │       │   │   tool_requests ◀──────────────────│       │          │     │       │
+  │       │   │   execute(ToolCall) ───────────────────▶│  get_or_start/run │     │
+  │       │   │   on_message(assistant+tool) ───▶│ persist+commit ────────▶│ emit ▶│
+  │       │   │   final answer ◀──────────────────│       │          │     │       │
+  │       │   │ status=COMPLETED ─────────────────────────────────────────▶│       │
+  │       │   │ emit completed ───────────────────────────────────────────▶│       │
+  │       │ SSE stream: snapshot + messages + completed (from DB truth)           │
 ```
 
 ### 4.2 Terminal tool call (sandbox)
@@ -424,12 +466,41 @@ ToolExecutor._terminal_run
 Failure is captured as `"TypeName: message"` in `task.error`; the exception
 is not re-raised. Success writes `result`, `input_tokens`, `output_tokens`.
 
-### 5.3 Transcript persistence
+### 5.3 Transcript persistence (incremental)
 
-`ordinal_base = max_ordinal(session_id)` (max existing, `-1` if none);
-message *i* gets `ordinal = ordinal_base + i + 1`. Rows carry
-`session_id`, `task_id`, `role` (via `MessageRole(role.value)`), `content`,
-`tool_call_id`, and `tool_calls = [req.model_dump() for req in tool_requests] or None`.
+`ordinal_base = max_ordinal(session_id)` (max existing, `-1` if none); the
+first message produced by a task gets `ordinal = ordinal_base + 1` and each
+subsequent message increments from there. Rows carry `session_id`,
+`task_id`, `role` (via `MessageRole(role.value)`), `content`, `tool_call_id`,
+and `tool_calls = [req.model_dump() for req in tool_requests] or None`.
+Each row is flushed **and committed** as it is produced, so it is durable
+and visible to concurrent readers immediately — this is what lets SSE
+clients replay a running task's transcript. The trade-off (a commit per
+message) is acceptable at current message volumes.
+
+### 5.6 SSE streaming (replay + wakeup)
+
+```
+_generator(task_id, db, broker):
+  last_ordinal = -1; seen_status = None
+  loop:
+    current = TaskRepository.get(task_id)          # fresh read each pass
+    messages = MessageRepository.list_by_task(task_id)
+    if current.status != seen_status:
+        seen_status = current.status
+        yield snapshot(TaskResponse)
+    for m in messages with ordinal > last_ordinal:
+        yield message(MessageResponse); last_ordinal = m.ordinal
+    if current.status is terminal (completed/failed/cancelled):
+        yield current.status.value(TaskResponse); return
+    db.commit()                                    # close the read snapshot
+    await wait_for(broker queue, 15s) else yield ": keepalive"
+finally: broker.unsubscribe(task_id, queue)
+```
+
+DB state is the source of truth; the broker queue only wakes the loop, so a
+subscriber never misses or duplicates a message and reconnects replay the
+DB, not the broker.
 
 ### 5.4 Path confinement
 
@@ -470,9 +541,10 @@ per-task cost accounting.
 |---|---|---|---|
 | GET | `/api/v1/healthz` | 200 `{"status":"ok"}` | – |
 | GET | `/api/v1/readyz` | 200 `{status, checks:{database,redis}}` | 503 degraded |
-| POST | `/api/v1/sessions/{session_id}/tasks` | 201 `TaskResponse` | 404 session, 422 body, 503 LLM unconfigured, 500 agent crash |
+| POST | `/api/v1/sessions/{session_id}/tasks` | 202 `TaskResponse` (status `pending`); runs in background | 404 session, 422 body, 503 LLM unconfigured |
 | GET | `/api/v1/sessions/{session_id}/tasks?limit&offset` | 200 `[TaskResponse]` | 404 session |
 | GET | `/api/v1/tasks/{task_id}` | 200 `TaskDetailResponse` | 404 task |
+| GET | `/api/v1/sessions/{session_id}/tasks/{task_id}/events` | 200 `text/event-stream` (snapshot + messages + terminal) | 404 session, 404 task |
 
 `TaskResponse`: `id, session_id, parent_task_id, agent_type, status, goal,
 result, error, input_tokens, output_tokens, started_at, finished_at,
@@ -493,17 +565,21 @@ ordered by ordinal.
 | Executor | Per-tool errors returned as results; terminal/git timeout → `ok=False` with message |
 | CoderAgent | Unknown tool name → TOOL message `"unknown tool: …"`; loop always terminates |
 | Orchestrator | Agent exceptions → `task.status=FAILED` + `error`; **not re-raised**; missing task → `ValueError` |
-| Gateway | 404 session/task, 422 validation, 503 LLM unconfigured (dependency), 201/200 otherwise |
+| EventBroker | Best-effort publish: `QueueFull`/slow subscriber dropped, never raises |
+| Gateway | 404 session/task, 422 validation, 503 LLM unconfigured (dependency), 202/200 otherwise; SSE closes on disconnect via `finally` unsubscribe |
 
 ## 9. Test strategy
 
 - **Unit** (no infra): config, model round-trips, path confinement, filesystem
   tool logic, registry validation, LLM message/adapters/factory (with stub
-  SDKs), coder agent (FakeLLM + stub executor). `make test-unit`.
+  SDKs), coder agent (FakeLLM + stub executor, incl. `on_message` hook),
+  event broker pub/sub. `make test-unit`.
 - **Sandbox**: real Docker execution (requires `make executor-image`).
 - **Integration** (requires `make up`): repositories, health/readiness,
-  orchestrator against real Postgres + FakeLLM + stub executor, tasks API via
-  ASGI client with `app.dependency_overrides[get_orchestrator]`.
+  orchestrator against real Postgres + FakeLLM + stub executor (incl.
+  broker-published message events and partial transcripts on failure),
+  tasks API via ASGI client with `app.dependency_overrides[get_orchestrator]`
+  (async `202` create + SSE replay/live streams).
 - Tooling: `make lint` (ruff), `make typecheck` (mypy strict, pydantic +
   sqlalchemy plugins), `make test`.
 
@@ -517,8 +593,9 @@ fixtures, autouse table truncation.
   entry + handler in `ToolExecutor._register`.
 - **New LLM provider**: implement `LLMProvider`, add a branch in
   `build_llm_client`, add config keys.
-- **Streaming to clients**: hook `Orchestrator.on_event` to an SSE/WebSocket
-  or Redis pub/sub transport; message-level events can be added per LLM call.
+- **Streaming to clients**: the broker already fans out `message` events;
+  swap `EventBroker` for Redis pub/sub (same interface) if the gateway and
+  orchestrator are split, or add per-LLM-call token/text events.
 - **Planner/reviewer/tester**: add LangGraph nodes/states composing
   `CoderAgent`-style loops; `Task.parent_task_id` already models the tree.
 - **Retries/cancellation/checkpoints**: extend `Orchestrator.run_task` and

@@ -25,8 +25,9 @@ from app.database.models.workspace import Workspace
 from app.database.repositories.message import MessageRepository
 from app.database.repositories.task import TaskRepository
 from app.executor.executor import ToolExecutor
-from app.llm.messages import ChatMessage, ToolRequest
+from app.llm.messages import ChatMessage, ChatRole, ToolRequest
 from app.llm.protocol import LLMProvider, LLMResponse, LLMUsage
+from app.orchestrator.broker import EventBroker
 from app.orchestrator.orchestrator import Orchestrator, OrchestratorEvent
 from app.tools.schemas import ToolCall, ToolName, ToolResult, ToolSpec
 
@@ -178,6 +179,7 @@ async def test_run_task_persists_transcript_and_finalizes(
         MessageRole.TOOL,
         MessageRole.ASSISTANT,
     ]
+    assert [message.ordinal for message in messages] == [0, 1, 2, 3]
     assert messages[0].content == "Fix the bug"
     assistant = messages[1]
     assert assistant.tool_calls is not None
@@ -189,14 +191,69 @@ async def test_run_task_persists_transcript_and_finalizes(
     assert tool_message.content == "42"
     assert messages[3].content == "Fixed."
 
-    assert [event.kind for event in events] == ["started", "completed"]
+    assert [event.kind for event in events] == [
+        "started",
+        "message",
+        "message",
+        "message",
+        "message",
+        "completed",
+    ]
     assert events[0].detail == "Fix the bug"
+    message_events = [event for event in events if event.kind == "message"]
+    assert [event.ordinal for event in message_events] == [0, 1, 2, 3]
+    assert message_events[0].message is not None
+    assert message_events[0].message.content == "Fix the bug"
     assert events[-1].detail == "Fixed."
     assert events[-1].message is not None
     assert events[-1].message.content == "Fixed."
 
 
-async def test_run_task_marks_failed_without_transcript(
+async def test_run_task_publishes_message_events_to_broker(
+    container: Container,
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    task = await _seed_task(db_session, workspace_dir=str(tmp_path))
+    fake = FakeLLM(
+        [
+            _tool_response(requests=[ToolRequest(name="file_read", arguments={"path": "x.py"})]),
+            _final_response("Fixed."),
+        ]
+    )
+    stub = _StubExecutor()
+    broker = EventBroker()
+    orchestrator = Orchestrator(
+        session_factory=container.session_factory,
+        llm=fake,
+        settings=container.settings,
+        event_broker=broker,
+        executor_factory=lambda _workspace_dir: cast(ToolExecutor, stub),
+    )
+    queue = await broker.subscribe(task.id)
+
+    await orchestrator.run_task(task.id)
+
+    received: list[OrchestratorEvent] = []
+    while not queue.empty():
+        received.append(queue.get_nowait())
+    assert [event.kind for event in received] == [
+        "started",
+        "message",
+        "message",
+        "message",
+        "message",
+        "completed",
+    ]
+    message_events = [event for event in received if event.kind == "message"]
+    assert [event.ordinal for event in message_events] == [0, 1, 2, 3]
+    assert message_events[0].message is not None
+    assert message_events[0].message.role == ChatRole.USER
+    assert message_events[1].message is not None
+    assert message_events[1].message.role == ChatRole.ASSISTANT
+
+
+async def test_run_task_marks_failed_but_keeps_partial_transcript(
     container: Container,
     db_session: AsyncSession,
     tmp_path: Path,
@@ -215,9 +272,10 @@ async def test_run_task_marks_failed_without_transcript(
     assert done.result is None
     assert done.error == "RuntimeError: boom"
     assert done.finished_at is not None
-    assert persisted == []
+    assert [message.role for message in persisted] == [MessageRole.USER]
+    assert persisted[0].content == "Fix the bug"
 
-    assert [event.kind for event in events] == ["started", "failed"]
+    assert [event.kind for event in events] == ["started", "message", "failed"]
     assert events[-1].detail == "RuntimeError: boom"
 
 

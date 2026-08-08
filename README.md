@@ -5,14 +5,16 @@ plans work, edits files, runs commands and tests, reviews its own output,
 and deploys — the architecture lineage of Cursor Agent, Claude Code, Devin,
 and GitHub Copilot Workspace.
 
-**Status:** Phase 5 (agent loop) in progress. The provider-agnostic LLM
+**Status:** Phase 6 (streaming) complete. The provider-agnostic LLM
 abstraction (Anthropic, OpenAI, OpenAI-compatible local backends), a
-LangGraph coder agent, and the orchestrator exist and are tested; the
-gateway now exposes an HTTP run endpoint
-(``POST /sessions/{id}/tasks``) that creates and runs a task inline, plus
-task listing and detail (with persisted transcript) endpoints. Retries,
-cancellation, streaming events to clients, and the multi-agent pipeline
-are still to come.
+LangGraph coder agent, the orchestrator, and the gateway task API exist and
+are tested. Tasks now run **asynchronously** (`POST /sessions/{id}/tasks`
+returns `202`), the orchestrator persists the transcript **incrementally**
+and publishes an event per message, and
+`GET /sessions/{id}/tasks/{task_id}/events` streams progress as **Server-Sent
+Events** (snapshot + live transcript + terminal event). Retries,
+cancellation, durable checkpoints, and the multi-agent pipeline are still to
+come.
 
 ## Architecture
 
@@ -75,7 +77,7 @@ make test-unit  # unit tests only, no infra required
 | `gateway`        | FastAPI app factory, routes, request dependencies    | done  |
 | `core`           | settings, structured logging, DI container           | done  |
 | `database`       | async engine, sessions, ORM base, Alembic migrations | done  |
-| `orchestrator`   | agent execution graph (LangGraph)                    | 5     |
+| `orchestrator`   | agent execution graph (LangGraph) + event bus        | 5-6   |
 | `agents`         | planner / coder / reviewer / tester / debug / deploy | 5-8   |
 | `tools`          | typed tool contracts                                 | 4     |
 | `executor`       | sandboxed tool execution                             | 4     |

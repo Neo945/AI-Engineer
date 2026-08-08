@@ -1,6 +1,7 @@
 # High-Level Design (HLD) — coding-agent
 
-Version 1.0 · applies to the current implementation (Phases 1–5, commit `c46f461`)
+Version 1.1 · applies to the current implementation (Phases 1–6, streaming
+events over SSE)
 
 ---
 
@@ -136,10 +137,11 @@ everything through repositories, never via raw SQL.
 - `run_task(task_id)` is the single entry point for executing a task.
 - Owns the lifecycle: `PENDING → RUNNING → COMPLETED | FAILED`.
 - Resolves the workspace, builds an executor + coder agent, runs the loop,
-  persists the transcript (ordinal-ordered), records result/error, token
-  totals and timestamps.
-- Emits `OrchestratorEvent`s (`started`/`completed`/`failed`) to an
-  injectable callback — the hook for future SSE/WebSocket streaming.
+  persists the transcript incrementally (each message committed and
+  published as an event), records result/error, token totals and timestamps.
+- Emits `OrchestratorEvent`s (`started`/`message`/`completed`/`failed`) to an
+  injectable `EventBroker` (and optional callback) — the transport for SSE
+  streaming and the seam for Redis pub/sub at scale.
 
 ### 6.3 CoderAgent (LangGraph)
 
@@ -150,6 +152,9 @@ everything through repositories, never via raw SQL.
   3. if a final answer → terminate.
 - Bounded by `max_steps` (default 8) to guarantee termination; accumulates
   token usage via `Annotated[int, operator.add]` reducers.
+- An optional `on_message` hook fires for every produced message (goal,
+  assistant turns, tool results) in transcript order, which is what lets the
+  orchestrator persist and stream live.
 
 ### 6.4 LLM layer
 
@@ -180,17 +185,18 @@ everything through repositories, never via raw SQL.
 
 ```
 1. POST /sessions/{id}/tasks {"goal": "…"}
-2. Gateway: 404 if session missing → build/run Task (PENDING) → commit
-3. Orchestrator: mark RUNNING + started_at → resolve workspace dir
-4. Build ToolExecutor + CoderAgent
+2. Gateway: 404 if session missing → create Task (PENDING) → commit → 202
+3. Background: Orchestrator marks RUNNING + started_at → resolves workspace dir
+4. Build ToolExecutor + CoderAgent (on_message hook wires persistence+events)
 5. Loop (≤ max_steps):
      a. LLM.complete(transcript, tools, system) → LLMResponse
      b. tool_requests? → ToolExecutor.execute(each) → TOOL messages
      c. no tools → final answer → end
-6. Orchestrator: persist transcript (ordinals) via MessageRepository
-7. Orchestrator: mark COMPLETED (answer, tokens, finished_at) | FAILED (error)
-8. Emit events; Gateway refreshes task and returns 201 TaskResponse
-9. Client polls GET /tasks/{id} for the durable transcript
+     d. each message → persist + commit (incremental) + publish "message" event
+6. Orchestrator: mark COMPLETED (answer, tokens, finished_at) | FAILED (error)
+7. Events fan out via EventBroker; clients get 202 and open the SSE stream
+8. SSE replays snapshot + transcript, then streams live; client may also
+   poll GET /tasks/{id} for the durable transcript
 ```
 
 ## 8. Security model
@@ -264,7 +270,11 @@ spawned on the next call.
 
 ## 13. Evolution path
 
-1. Streaming events (SSE/WS) on top of the existing `on_event` hook.
+1. ~~Streaming events (SSE/WS) on top of the existing `on_event` hook.~~
+   **Done (Phase 6)** — tasks run asynchronously (`202`), the orchestrator
+   persists per-message and publishes `message` events through an in-process
+   `EventBroker`, and `GET …/tasks/{id}/events` streams an SSE replay + live
+   updates. Scale-out swap: `EventBroker` → Redis pub/sub, same interface.
 2. Retries, cancellation, durable checkpoints (`Task`/`Session` state).
 3. Multi-agent pipeline: planner → coder → reviewer → tester.
 4. Auth + user-facing session/workspace management APIs.

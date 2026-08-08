@@ -6,6 +6,7 @@ PostgreSQL. They require PostgreSQL and Redis on localhost (``make up``).
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Callable
 from typing import cast
@@ -127,6 +128,7 @@ def use_fake_llm(app: FastAPI, container: Container) -> Callable[[LLMProvider], 
                 session_factory=container.session_factory,
                 llm=llm,
                 settings=container.settings,
+                event_broker=container.event_broker,
                 executor_factory=lambda _workspace_dir: cast(ToolExecutor, _StubExecutor()),
             )
 
@@ -147,20 +149,20 @@ async def test_create_and_run_task_completes_and_persists(
         f"/api/v1/sessions/{session_id}/tasks",
         json={"goal": "Fix the bug"},
     )
-    assert response.status_code == 201
+    assert response.status_code == 202
     body = response.json()
-    assert body["status"] == "completed"
-    assert body["result"] == "Fixed."
+    assert body["status"] == "pending"
     assert body["agent_type"] == "coder"
     assert body["session_id"] == str(session_id)
-    assert body["input_tokens"] == 5
-    assert body["output_tokens"] == 2
     task_id = body["id"]
 
     detail = await client.get(f"/api/v1/tasks/{task_id}")
     assert detail.status_code == 200
     detail_body = detail.json()
     assert detail_body["status"] == "completed"
+    assert detail_body["result"] == "Fixed."
+    assert detail_body["input_tokens"] == 5
+    assert detail_body["output_tokens"] == 2
     assert [(m["role"], m["content"]) for m in detail_body["messages"]] == [
         ("user", "Fix the bug"),
         ("assistant", "Fixed."),
@@ -188,7 +190,7 @@ async def test_create_and_run_task_persists_tool_roundtrip(
         f"/api/v1/sessions/{session_id}/tasks",
         json={"goal": "Inspect the repo"},
     )
-    assert response.status_code == 201
+    assert response.status_code == 202
     task_id = response.json()["id"]
 
     detail = await client.get(f"/api/v1/tasks/{task_id}")
@@ -255,3 +257,115 @@ async def test_get_task_not_found(client: AsyncClient) -> None:
     response = await client.get(f"/api/v1/tasks/{uuid.uuid4()}")
     assert response.status_code == 404
     assert response.json()["detail"] == "task not found"
+
+
+async def _collect_sse(client: AsyncClient, url: str) -> list[tuple[str, dict[str, object]]]:
+    """Stream ``url`` and parse every non-comment SSE frame."""
+    async with client.stream("GET", url) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        text = "".join([chunk async for chunk in response.aiter_text()])
+    events: list[tuple[str, dict[str, object]]] = []
+    for block in text.split("\n\n"):
+        if not block.strip() or block.startswith(":"):
+            continue
+        event = ""
+        data_lines: list[str] = []
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                event = line[len("event:") :].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:") :].strip())
+        events.append((event, json.loads("".join(data_lines))))
+    return events
+
+
+async def test_task_events_stream_replays_and_closes(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    use_fake_llm: Callable[[LLMProvider], None],
+) -> None:
+    session_id = await _seed_session(db_session)
+    use_fake_llm(FakeLLM([_final_response("Fixed.")]))
+
+    created = await client.post(
+        f"/api/v1/sessions/{session_id}/tasks",
+        json={"goal": "Fix the bug"},
+    )
+    assert created.status_code == 202
+    task_id = created.json()["id"]
+
+    events = await _collect_sse(client, f"/api/v1/sessions/{session_id}/tasks/{task_id}/events")
+
+    assert [event for event, _ in events] == [
+        "snapshot",
+        "message",
+        "message",
+        "completed",
+    ]
+    assert events[0][1]["status"] == "completed"
+    assert [(data["role"], data["content"]) for _, data in events[1:3]] == [
+        ("user", "Fix the bug"),
+        ("assistant", "Fixed."),
+    ]
+    assert [data["ordinal"] for _, data in events[1:3]] == [0, 1]
+    assert events[3][1]["status"] == "completed"
+    assert events[3][1]["result"] == "Fixed."
+
+
+async def test_task_events_streams_live_transcript(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    use_fake_llm: Callable[[LLMProvider], None],
+) -> None:
+    session_id = await _seed_session(db_session)
+    request = ToolRequest(name="file_read", arguments={"path": "x.py"})
+    use_fake_llm(
+        FakeLLM(
+            [
+                _tool_response(requests=[request]),
+                _final_response("Done."),
+            ]
+        )
+    )
+
+    created = await client.post(
+        f"/api/v1/sessions/{session_id}/tasks",
+        json={"goal": "Inspect the repo"},
+    )
+    task_id = created.json()["id"]
+
+    events = await _collect_sse(client, f"/api/v1/sessions/{session_id}/tasks/{task_id}/events")
+
+    assert [event for event, _ in events] == [
+        "snapshot",
+        "message",
+        "message",
+        "message",
+        "message",
+        "completed",
+    ]
+    assert [data["role"] for _, data in events[1:5]] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    assert events[3][1]["content"] == "42"
+    assert events[3][1]["tool_call_id"] is not None
+
+
+async def test_task_events_for_missing_task_returns_404(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    session_id = await _seed_session(db_session)
+    response = await client.get(f"/api/v1/sessions/{session_id}/tasks/{uuid.uuid4()}/events")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "task not found"
+
+
+async def test_task_events_for_missing_session_returns_404(client: AsyncClient) -> None:
+    response = await client.get(f"/api/v1/sessions/{uuid.uuid4()}/tasks/{uuid.uuid4()}/events")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "session not found"

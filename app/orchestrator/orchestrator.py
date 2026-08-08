@@ -21,8 +21,9 @@ from app.database.repositories.task import TaskRepository
 from app.executor.executor import ToolExecutor
 from app.llm.messages import ChatMessage, ToolRequest
 from app.llm.protocol import LLMProvider
+from app.orchestrator.broker import EventBroker
 
-EventKind = Literal["started", "completed", "failed"]
+EventKind = Literal["started", "message", "completed", "failed"]
 
 TaskEventHandler = Callable[["OrchestratorEvent"], Awaitable[None] | None]
 ExecutorFactory = Callable[[Path], ToolExecutor]
@@ -34,16 +35,20 @@ class OrchestratorEvent:
 
     Attributes:
         task_id: The task this event belongs to.
-        kind: One of ``started``, ``completed``, or ``failed``.
-        message: The final assistant message on ``completed`` events.
+        kind: ``started``, ``message`` (a transcript entry was persisted),
+            ``completed``, or ``failed``.
+        message: The assistant message on ``completed`` events, or the
+            persisted transcript entry on ``message`` events.
         detail: The goal (``started``), final answer (``completed``), or
             formatted error (``failed``).
+        ordinal: Transcript ordinal of ``message`` on ``message`` events.
     """
 
     task_id: uuid.UUID
     kind: EventKind
     message: ChatMessage | None = None
     detail: str | None = None
+    ordinal: int | None = None
 
 
 def _utcnow() -> datetime:
@@ -62,9 +67,14 @@ class Orchestrator:
     captured so callers can inspect or surface the failure, keeping the run
     endpoint and polling model uniform.
 
+    Every produced message is persisted to the transcript as it is emitted
+    (each commit is immediately visible to concurrent readers) and an event
+    is published for it, so clients can stream a task's progress live while
+    still being able to replay the transcript from the database at any time.
+
     Events are delivered to the optional ``on_event`` callback (sync or
-    async) so callers can stream status transitions to a UI without coupling
-    the orchestrator to a transport.
+    async) and/or the optional ``event_broker`` so callers can stream status
+    transitions to a UI without coupling the orchestrator to a transport.
     """
 
     def __init__(
@@ -74,12 +84,14 @@ class Orchestrator:
         llm: LLMProvider,
         settings: Settings,
         on_event: TaskEventHandler | None = None,
+        event_broker: EventBroker | None = None,
         executor_factory: ExecutorFactory | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._llm = llm
         self._settings = settings
         self._on_event = on_event
+        self._event_broker = event_broker
         self._executor_factory = executor_factory or self._default_executor
 
     def _default_executor(self, workspace_dir: Path) -> ToolExecutor:
@@ -102,18 +114,33 @@ class Orchestrator:
             await session.commit()
 
             executor = self._executor_factory(workspace_dir)
+            ordinal = await MessageRepository(session).max_ordinal(task.session_id)
+
+            async def _append(message: ChatMessage) -> None:
+                nonlocal ordinal
+                ordinal += 1
+                await self._persist_message(session, task, message, ordinal)
+                await self._emit(
+                    OrchestratorEvent(
+                        task_id=task.id,
+                        kind="message",
+                        message=message,
+                        ordinal=ordinal,
+                    ),
+                )
+
             agent = CoderAgent(
                 llm=self._llm,
                 executor=executor,
                 max_tokens=self._settings.llm_max_tokens,
                 temperature=self._settings.llm_temperature,
+                on_message=_append,
             )
             try:
                 result = await agent.run(task.goal)
             except Exception as exc:
                 return await self._fail(session, task, exc)
 
-            await self._persist_transcript(session, task, result.messages)
             task.status = TaskStatus.COMPLETED
             task.result = result.answer
             task.input_tokens = result.input_tokens
@@ -141,27 +168,31 @@ class Orchestrator:
         )
         return task
 
-    async def _persist_transcript(
+    async def _persist_message(
         self,
         session: AsyncSession,
         task: Task,
-        messages: Sequence[ChatMessage],
+        message: ChatMessage,
+        ordinal: int,
     ) -> None:
-        repository = MessageRepository(session)
-        ordinal = await repository.max_ordinal(task.session_id)
-        rows = [
+        """Persist one transcript entry and commit it immediately.
+
+        Committing per message (rather than batching at the end) makes each
+        entry visible to concurrent readers, which is what lets SSE clients
+        replay the transcript while a task is still running.
+        """
+        session.add(
             Message(
                 session_id=task.session_id,
                 task_id=task.id,
                 role=MessageRole(message.role.value),
                 content=message.content,
-                ordinal=ordinal + index + 1,
+                ordinal=ordinal,
                 tool_call_id=message.tool_call_id,
                 tool_calls=self._serialize_tool_calls(message.tool_requests),
             )
-            for index, message in enumerate(messages)
-        ]
-        await repository.add_many(rows)
+        )
+        await session.commit()
 
     @staticmethod
     def _serialize_tool_calls(
@@ -171,6 +202,8 @@ class Orchestrator:
         return calls or None
 
     async def _emit(self, event: OrchestratorEvent) -> None:
+        if self._event_broker is not None:
+            await self._event_broker.publish(event)
         if self._on_event is None:
             return
         result = self._on_event(event)

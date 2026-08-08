@@ -9,7 +9,7 @@ the loop ends. The loop is bounded by ``max_steps`` to guarantee termination.
 from __future__ import annotations
 
 import operator
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, TypedDict
 
@@ -74,6 +74,9 @@ class CoderAgent:
         max_steps: Upper bound on LLM calls per run.
         max_tokens: Cap on generated tokens per LLM call.
         temperature: Sampling temperature.
+        on_message: Optional callback invoked with every produced message
+            (the goal, each assistant turn, and each tool result) in
+            transcript order, as it is produced.
     """
 
     def __init__(
@@ -85,6 +88,7 @@ class CoderAgent:
         max_steps: int = _DEFAULT_MAX_STEPS,
         max_tokens: int = 4096,
         temperature: float = 0.0,
+        on_message: Callable[[ChatMessage], Awaitable[None] | None] | None = None,
     ) -> None:
         self._llm = llm
         self._executor = executor
@@ -92,6 +96,7 @@ class CoderAgent:
         self._max_steps = max_steps
         self._max_tokens = max_tokens
         self._temperature = temperature
+        self._on_message = on_message
         self._graph = self._build_graph()
 
     def _build_graph(self) -> Any:
@@ -120,12 +125,13 @@ class CoderAgent:
         Returns:
             The final result including the full transcript.
         """
+        seeded = [
+            ChatMessage(role=ChatRole.USER, content=goal),
+            *initial_messages,
+        ]
         initial: CoderState = {
             "goal": goal,
-            "messages": [
-                ChatMessage(role=ChatRole.USER, content=goal),
-                *initial_messages,
-            ],
+            "messages": seeded,
             "step": 0,
             "max_steps": self._max_steps,
             "continue_loop": True,
@@ -133,6 +139,8 @@ class CoderAgent:
             "input_tokens": 0,
             "output_tokens": 0,
         }
+        for message in seeded:
+            await self._invoke_on_message(message)
         final = await self._graph.ainvoke(initial)
         return CoderResult(
             answer=final.get("final_answer", ""),
@@ -158,22 +166,26 @@ class CoderAgent:
             temperature=self._temperature,
         )
         if response.tool_requests:
+            assistant = ChatMessage(
+                role=ChatRole.ASSISTANT,
+                content=response.content,
+                tool_requests=response.tool_requests,
+            )
+            await self._invoke_on_message(assistant)
+            tool_messages = [
+                await self._execute_tool(request) for request in response.tool_requests
+            ]
             return {
-                "messages": [
-                    ChatMessage(
-                        role=ChatRole.ASSISTANT,
-                        content=response.content,
-                        tool_requests=response.tool_requests,
-                    ),
-                    *[await self._execute_tool(request) for request in response.tool_requests],
-                ],
+                "messages": [assistant, *tool_messages],
                 "step": state.get("step", 0) + 1,
                 "continue_loop": True,
                 "input_tokens": response.usage.input_tokens,
                 "output_tokens": response.usage.output_tokens,
             }
+        final = ChatMessage(role=ChatRole.ASSISTANT, content=response.content)
+        await self._invoke_on_message(final)
         return {
-            "messages": [ChatMessage(role=ChatRole.ASSISTANT, content=response.content)],
+            "messages": [final],
             "step": state.get("step", 0) + 1,
             "continue_loop": False,
             "final_answer": response.content,
@@ -185,19 +197,30 @@ class CoderAgent:
         try:
             tool = ToolName(request.name)
         except ValueError:
-            return ChatMessage(
+            message = ChatMessage(
                 role=ChatRole.TOOL,
                 content=f"unknown tool: {request.name}",
                 tool_call_id=request.id,
             )
+            await self._invoke_on_message(message)
+            return message
         result = await self._executor.execute(
             ToolCall(id=request.id, tool=tool, arguments=request.arguments)
         )
-        return ChatMessage(
+        message = ChatMessage(
             role=ChatRole.TOOL,
             content=format_tool_result(result),
             tool_call_id=result.call_id,
         )
+        await self._invoke_on_message(message)
+        return message
+
+    async def _invoke_on_message(self, message: ChatMessage) -> None:
+        if self._on_message is None:
+            return
+        result = self._on_message(message)
+        if result is not None:
+            await result
 
 
 def format_tool_result(result: ToolResult) -> str:

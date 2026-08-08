@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.container import Container
 from app.core.logging import get_logger
+from app.orchestrator.broker import EventBroker
 from app.orchestrator.orchestrator import Orchestrator
 
 logger = get_logger(__name__)
@@ -30,6 +31,14 @@ async def get_db_session(
 
 ContainerDep = Annotated[Container, Depends(get_container)]
 SessionDep = Annotated[AsyncSession, Depends(get_db_session)]
+
+
+def get_event_broker(container: ContainerDep) -> EventBroker:
+    """Return the shared event broker backing SSE streams."""
+    return container.event_broker
+
+
+EventBrokerDep = Annotated[EventBroker, Depends(get_event_broker)]
 
 
 def get_orchestrator(container: ContainerDep) -> Orchestrator:

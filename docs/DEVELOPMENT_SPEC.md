@@ -7,12 +7,12 @@ to achieve), the **deliverables** (what was built), and the **result**
 
 Final state at the time of writing:
 
-- **Tests:** 98 passing (unit + integration + sandbox)
+- **Tests:** 112 passing (unit + integration + sandbox)
 - **Linting:** `ruff` clean, `ruff format --check` clean
-- **Types:** `mypy --strict` clean over 78 source files
+- **Types:** `mypy --strict` clean over 80 source files
 - **Database:** migrations `0001`–`0004` applied, downgrade/upgrade
   round-trips verified
-- **Repository:** two commits pushed to `main` at
+- **Repository:** committed and pushed to `main` at
   `github.com/Neo945/AI-Engineer`
 
 ---
@@ -210,21 +210,67 @@ correct precedence for 404 (missing session) and 503 (LLM not configured).
 
 ---
 
+## Step 8 — Streaming agent events over SSE (Phase 6)
+
+**Spec**
+
+Make task execution asynchronous and stream its progress to clients: run
+tasks in the background after `POST`, persist the transcript incrementally
+so partial work is durable and visible while running, and expose a
+Server-Sent Events endpoint that replays the current state and then emits
+each new message and status transition live until the task terminates.
+
+**Deliverables**
+
+- `app/orchestrator/broker.py` — `EventBroker`, an in-process pub/sub
+  fan-out per task (the single-process stand-in for Redis pub/sub)
+- `app/orchestrator/orchestrator.py` — `EventKind` gains `message`;
+  `OrchestratorEvent` gains `ordinal`; `Orchestrator` takes an optional
+  `event_broker`; transcript rows are committed per message (immediately
+  visible to concurrent readers) via a `CoderAgent.on_message` hook
+- `app/agents/coder.py` — optional `on_message` callback invoked for the
+  goal, every assistant turn, and every tool result in transcript order
+- `app/gateway/routes/tasks.py` — `POST /sessions/{id}/tasks` now returns
+  `202` and runs the task in the background; new
+  `GET /sessions/{id}/tasks/{task_id}/events` SSE endpoint that replays
+  (snapshot + transcript) then streams live updates, with 15s keepalives,
+  and closes on a terminal event
+- `app/core/container.py` / `app/gateway/dependencies.py` — shared
+  `event_broker` wired through the container and `EventBrokerDep`
+- `tests/unit/test_event_broker.py`; `on_message` unit tests; orchestrator
+  integration tests updated for message events and partial transcripts on
+  failure; tasks API tests updated for `202` plus new SSE stream tests
+
+**Result**
+
+- 14 new tests; full suite at 112 passing.
+- The SSE stream opens with a replay (task snapshot + persisted transcript)
+  and then live messages; DB state is the source of truth and broker events
+  only wake the streamer, so subscribers never miss or duplicate a message.
+- Failures keep the partial transcript (the goal message and any completed
+  steps), instead of discarding everything.
+- Migration-independent: no schema changes were required.
+
+---
+
 ## Final integrated result
 
-With all seven steps in place, an end-to-end request flow is verified:
+With all eight steps in place, an end-to-end request flow is verified:
 
-1. `POST /api/v1/sessions/{id}/tasks` creates a task, runs the LangGraph
-   coder loop against the configured LLM, executes tools in the sandbox,
-   persists the transcript, and returns the final state.
-2. `GET /api/v1/tasks/{id}` returns the task with its full, ordered
+1. `POST /api/v1/sessions/{id}/tasks` creates a task (status `pending`) and
+   runs the LangGraph coder loop against the configured LLM in the
+   background, executing tools in the sandbox and persisting the transcript
+   incrementally.
+2. `GET /api/v1/sessions/{id}/tasks/{task_id}/events` replays the current
+   state and then streams each message and status transition live until the
+   task terminates.
+3. `GET /api/v1/tasks/{id}` returns the task with its full, ordered
    transcript and token accounting.
-3. Every step is covered by tests, lint, and strict typing; the work is
+4. Every step is covered by tests, lint, and strict typing; the work is
    committed and pushed to GitHub.
 
 ### What is intentionally out of scope (future phases)
 
-- Streaming events to clients (SSE/WebSocket)
 - Retries, cancellation, and durable checkpoints
 - Multi-agent pipeline: planner → coder → reviewer → tester
 - Authentication/authorization and user-facing session management

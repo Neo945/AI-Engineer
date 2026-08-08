@@ -19,6 +19,7 @@ from app.core.config import Settings, get_settings
 from app.database.engine import build_async_engine
 from app.database.session import create_session_factory
 from app.llm.factory import build_llm_client
+from app.orchestrator.broker import EventBroker
 from app.orchestrator.orchestrator import Orchestrator
 
 _DEFAULT_POOL_SIZE: Final = 10
@@ -34,12 +35,14 @@ class Container:
         engine: Async SQLAlchemy engine (connection pool).
         session_factory: Factory producing request-scoped ``AsyncSession``.
         redis: Async Redis client (cache, rate limits, pub/sub).
+        event_broker: In-process fan-out for orchestrator events.
     """
 
     settings: Settings
     engine: AsyncEngine
     session_factory: async_sessionmaker[AsyncSession]
     redis: Redis
+    event_broker: EventBroker = field(default_factory=EventBroker)
     _orchestrator: Orchestrator | None = field(init=False, default=None, repr=False)
 
     @classmethod
@@ -83,5 +86,6 @@ class Container:
                 session_factory=self.session_factory,
                 llm=llm,
                 settings=self.settings,
+                event_broker=self.event_broker,
             )
         return self._orchestrator
