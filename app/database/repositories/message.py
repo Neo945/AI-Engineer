@@ -43,6 +43,23 @@ class MessageRepository(BaseRepository[Message, uuid.UUID]):
         )
         return (await self._session.scalars(stmt)).all()
 
+    async def list_by_task(
+        self,
+        task_id: uuid.UUID,
+        *,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> Sequence[Message]:
+        """List a single task's transcript in chronological order."""
+        stmt = (
+            select(Message)
+            .where(Message.task_id == task_id)
+            .order_by(Message.ordinal.asc(), Message.created_at.asc(), Message.id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return (await self._session.scalars(stmt)).all()
+
     async def add_many(self, messages: Sequence[Message]) -> None:
         """Persist multiple messages in a single flush."""
         self._session.add_all(messages)

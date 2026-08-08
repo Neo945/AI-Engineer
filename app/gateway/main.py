@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from app.core.config import Settings, get_settings
 from app.core.container import Container
 from app.core.logging import configure_logging, get_logger
-from app.gateway.routes import health
+from app.gateway.routes import health, tasks
 
 logger = get_logger(__name__)
 
@@ -43,6 +43,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(health.router, prefix=resolved.api_prefix)
+    app.include_router(tasks.router, prefix=resolved.api_prefix)
     return app
 
 

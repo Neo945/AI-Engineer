@@ -9,7 +9,7 @@ honouring dependency inversion.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final
 
 from redis.asyncio import Redis
@@ -18,6 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.core.config import Settings, get_settings
 from app.database.engine import build_async_engine
 from app.database.session import create_session_factory
+from app.llm.factory import build_llm_client
+from app.orchestrator.orchestrator import Orchestrator
 
 _DEFAULT_POOL_SIZE: Final = 10
 _DEFAULT_MAX_OVERFLOW: Final = 20
@@ -38,6 +40,7 @@ class Container:
     engine: AsyncEngine
     session_factory: async_sessionmaker[AsyncSession]
     redis: Redis
+    _orchestrator: Orchestrator | None = field(init=False, default=None, repr=False)
 
     @classmethod
     def build(cls, settings: Settings | None = None) -> Container:
@@ -66,3 +69,19 @@ class Container:
         """Release all pooled resources. Idempotent."""
         await self.engine.dispose()
         await self.redis.aclose()
+
+    def orchestrator(self) -> Orchestrator:
+        """Return the shared orchestrator, building its LLM client lazily.
+
+        The LLM client is constructed on first use so starting the application
+        never requires LLM credentials; misconfiguration surfaces as a runtime
+        error only when a task is actually run.
+        """
+        if self._orchestrator is None:
+            llm = build_llm_client(self.settings)
+            self._orchestrator = Orchestrator(
+                session_factory=self.session_factory,
+                llm=llm,
+                settings=self.settings,
+            )
+        return self._orchestrator

@@ -6,11 +6,13 @@ and deploys — the architecture lineage of Cursor Agent, Claude Code, Devin,
 and GitHub Copilot Workspace.
 
 **Status:** Phase 5 (agent loop) in progress. The provider-agnostic LLM
-abstraction (Anthropic, OpenAI, OpenAI-compatible local backends) and a
-LangGraph coder agent exist and are tested; the orchestrator persists each
-task's transcript and lifecycle to PostgreSQL and emits status events, but
-the HTTP/gateway run endpoint, retries, cancellation, and multi-agent
-pipeline are still to come.
+abstraction (Anthropic, OpenAI, OpenAI-compatible local backends), a
+LangGraph coder agent, and the orchestrator exist and are tested; the
+gateway now exposes an HTTP run endpoint
+(``POST /sessions/{id}/tasks``) that creates and runs a task inline, plus
+task listing and detail (with persisted transcript) endpoints. Retries,
+cancellation, streaming events to clients, and the multi-agent pipeline
+are still to come.
 
 ## Architecture
 
