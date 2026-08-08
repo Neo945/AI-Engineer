@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coding-agent"
+version = "0.1.0"
+description = "Autonomous AI software engineering agent"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.9,<3.0",
+    "pydantic-settings>=2.5",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.30",
+    "alembic>=1.13",
+    "redis>=5.0",
+    "structlog>=24.1",
+    "greenlet>=3.0",
+    "pgvector>=0.3",
+    "aiodocker>=0.27,<1.0",
+    "anthropic>=0.40,<1.0",
+    "openai>=1.55,<2.0",
+    "langgraph>=1.0,<2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_return_any = false
+warn_unused_configs = true
+plugins = ["pydantic.mypy", "sqlalchemy.ext.mypy.plugin"]
+mypy_path = "."
+packages = ["app", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["aiodocker.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+check_untyped_defs = true
+
+[tool.pytest.ini_options]
+addopts = "-ra -q"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: requires PostgreSQL and Redis to be running (make up)",
+]
