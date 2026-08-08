@@ -34,8 +34,9 @@ lineage of Cursor Agent, Claude Code, Devin, and Copilot Workspace.
 ### Non-goals (for now)
 
 - Frontend, authentication, multi-tenancy, payment/billing.
-- Long-running orchestration across many tasks (no durable checkpoints,
-  retries, or cancellation yet).
+- Long-running orchestration across many tasks; automatic retries on
+  transient failures (manual retries and cooperative cancellation are in;
+  automatic retries conflict with the terminal-status SSE close).
 - Multi-agent planning/review/testing pipeline (single coder agent today).
 - Retrieval (AST indexing, embeddings) and long-term memory.
 
@@ -135,11 +136,12 @@ everything through repositories, never via raw SQL.
 ### 6.2 Orchestrator
 
 - `run_task(task_id)` is the single entry point for executing a task.
-- Owns the lifecycle: `PENDING → RUNNING → COMPLETED | FAILED`.
+- Owns the lifecycle: `PENDING → RUNNING → COMPLETED | FAILED | CANCELLED`.
 - Resolves the workspace, builds an executor + coder agent, runs the loop,
   persists the transcript incrementally (each message committed and
   published as an event), records result/error, token totals and timestamps.
-- Emits `OrchestratorEvent`s (`started`/`message`/`completed`/`failed`) to an
+- Emits `OrchestratorEvent`s (`started`/`message`/`completed`/`failed`/
+  `cancelled`) to an
   injectable `EventBroker` (and optional callback) — the transport for SSE
   streaming and the seam for Redis pub/sub at scale.
 
@@ -276,6 +278,12 @@ spawned on the next call.
    `EventBroker`, and `GET …/tasks/{id}/events` streams an SSE replay + live
    updates. Scale-out swap: `EventBroker` → Redis pub/sub, same interface.
 2. Retries, cancellation, durable checkpoints (`Task`/`Session` state).
+   **Done (Phase 7)** — tasks carry a durable `attempt`/`max_attempts`
+   counter; `POST /tasks/{id}/retry` re-runs a terminal task (transcript is
+   kept and appended to), and `POST /tasks/{id}/cancel` persists `cancelled`
+   and cooperatively stops the running agent at its next step boundary via a
+   `CancellationRegistry` (`should_cancel` hook). Scale-out swap: the
+   in-process registry → a shared signal store, same interface.
 3. Multi-agent pipeline: planner → coder → reviewer → tester.
 4. Auth + user-facing session/workspace management APIs.
 5. Retrieval (AST + embeddings via pgvector) and memory.

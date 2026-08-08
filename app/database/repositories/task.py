@@ -18,18 +18,27 @@ class TaskRepository(BaseRepository[Task, uuid.UUID]):
 
     model = Task
 
-    async def get_for_run(self, task_id: uuid.UUID) -> Task | None:
+    async def get_for_run(
+        self,
+        task_id: uuid.UUID,
+        *,
+        for_update: bool = False,
+    ) -> Task | None:
         """Fetch a task with its session and workspace eagerly loaded.
 
         Orchestration needs the workspace path to bind an executor, so the
         relationship chain is joined up front instead of lazily loaded (which
-        is not safe in an async context).
+        is not safe in an async context). ``for_update`` takes a row lock so
+        the status guard (terminal/running) is atomic against concurrent
+        runs and cancels.
         """
         stmt = (
             select(Task)
             .where(Task.id == task_id)
             .options(joinedload(Task.session).joinedload(Session.workspace))
         )
+        if for_update:
+            stmt = stmt.with_for_update(of=Task)
         return (await self._session.scalars(stmt)).unique().one_or_none()
 
     async def list_by_session(

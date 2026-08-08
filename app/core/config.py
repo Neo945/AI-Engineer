@@ -42,6 +42,8 @@ class Settings(BaseSettings):
         llm_max_tokens: Cap on tokens generated per LLM request.
         llm_temperature: Sampling temperature for LLM requests.
         llm_timeout_seconds: Per-request timeout for LLM calls.
+        task_max_attempts: Default cap on how many times a task may be run
+            (retried) before it is left in its terminal state.
     """
 
     model_config = SettingsConfigDict(
@@ -77,6 +79,8 @@ class Settings(BaseSettings):
     llm_max_tokens: int = Field(default=4096, ge=1)
     llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     llm_timeout_seconds: float = Field(default=120.0, ge=1.0)
+
+    task_max_attempts: int = Field(default=3, ge=1)
 
 
 @lru_cache

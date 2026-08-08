@@ -5,15 +5,17 @@ plans work, edits files, runs commands and tests, reviews its own output,
 and deploys — the architecture lineage of Cursor Agent, Claude Code, Devin,
 and GitHub Copilot Workspace.
 
-**Status:** Phase 6 (streaming) complete. The provider-agnostic LLM
-abstraction (Anthropic, OpenAI, OpenAI-compatible local backends), a
-LangGraph coder agent, the orchestrator, and the gateway task API exist and
-are tested. Tasks now run **asynchronously** (`POST /sessions/{id}/tasks`
-returns `202`), the orchestrator persists the transcript **incrementally**
-and publishes an event per message, and
-`GET /sessions/{id}/tasks/{task_id}/events` streams progress as **Server-Sent
-Events** (snapshot + live transcript + terminal event). Retries,
-cancellation, durable checkpoints, and the multi-agent pipeline are still to
+**Status:** Phase 7 (retries, cancellation, durable checkpoints) complete.
+The provider-agnostic LLM abstraction (Anthropic, OpenAI, OpenAI-compatible
+local backends), a LangGraph coder agent, the orchestrator, and the gateway
+task API exist and are tested. Tasks run **asynchronously** (`POST
+/sessions/{id}/tasks` returns `202`), the orchestrator persists the
+transcript **incrementally** and publishes an event per message, and
+`GET /sessions/{id}/tasks/{task_id}/events` streams progress as
+**Server-Sent Events** (snapshot + live transcript + terminal event). Tasks
+track a durable **attempt** counter: `POST /tasks/{id}/retry` re-runs a
+terminal task within its budget, and `POST /tasks/{id}/cancel` stops a
+pending or running task cooperatively. The multi-agent pipeline is still to
 come.
 
 ## Architecture
@@ -77,7 +79,7 @@ make test-unit  # unit tests only, no infra required
 | `gateway`        | FastAPI app factory, routes, request dependencies    | done  |
 | `core`           | settings, structured logging, DI container           | done  |
 | `database`       | async engine, sessions, ORM base, Alembic migrations | done  |
-| `orchestrator`   | agent execution graph (LangGraph) + event bus        | 5-6   |
+| `orchestrator`   | agent execution graph (LangGraph) + event bus + retry/cancel  | 5-7   |
 | `agents`         | planner / coder / reviewer / tester / debug / deploy | 5-8   |
 | `tools`          | typed tool contracts                                 | 4     |
 | `executor`       | sandboxed tool execution                             | 4     |

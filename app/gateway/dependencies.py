@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.container import Container
 from app.core.logging import get_logger
 from app.orchestrator.broker import EventBroker
+from app.orchestrator.cancellation import CancellationRegistry
 from app.orchestrator.orchestrator import Orchestrator
 
 logger = get_logger(__name__)
@@ -39,6 +40,17 @@ def get_event_broker(container: ContainerDep) -> EventBroker:
 
 
 EventBrokerDep = Annotated[EventBroker, Depends(get_event_broker)]
+
+
+def get_cancellation_registry(container: ContainerDep) -> CancellationRegistry:
+    """Return the shared cancellation registry backing cancel requests."""
+    return container.cancellations
+
+
+CancellationRegistryDep = Annotated[
+    CancellationRegistry,
+    Depends(get_cancellation_registry),
+]
 
 
 def get_orchestrator(container: ContainerDep) -> Orchestrator:

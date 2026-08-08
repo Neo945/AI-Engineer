@@ -22,11 +22,14 @@ from app.executor.executor import ToolExecutor
 from app.llm.messages import ChatMessage, ToolRequest
 from app.llm.protocol import LLMProvider
 from app.orchestrator.broker import EventBroker
+from app.orchestrator.cancellation import CancellationRegistry, TaskCancelled
 
-EventKind = Literal["started", "message", "completed", "failed"]
+EventKind = Literal["started", "message", "completed", "failed", "cancelled"]
 
 TaskEventHandler = Callable[["OrchestratorEvent"], Awaitable[None] | None]
 ExecutorFactory = Callable[[Path], ToolExecutor]
+
+_TERMINAL_STATUSES = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED})
 
 
 @dataclass(frozen=True)
@@ -36,7 +39,7 @@ class OrchestratorEvent:
     Attributes:
         task_id: The task this event belongs to.
         kind: ``started``, ``message`` (a transcript entry was persisted),
-            ``completed``, or ``failed``.
+            ``completed``, ``failed``, or ``cancelled``.
         message: The assistant message on ``completed`` events, or the
             persisted transcript entry on ``message`` events.
         detail: The goal (``started``), final answer (``completed``), or
@@ -85,6 +88,7 @@ class Orchestrator:
         settings: Settings,
         on_event: TaskEventHandler | None = None,
         event_broker: EventBroker | None = None,
+        cancellations: CancellationRegistry | None = None,
         executor_factory: ExecutorFactory | None = None,
     ) -> None:
         self._session_factory = session_factory
@@ -92,27 +96,43 @@ class Orchestrator:
         self._settings = settings
         self._on_event = on_event
         self._event_broker = event_broker
+        self._cancellations = cancellations
         self._executor_factory = executor_factory or self._default_executor
 
     def _default_executor(self, workspace_dir: Path) -> ToolExecutor:
         return ToolExecutor.build(workspace_dir=workspace_dir, settings=self._settings)
 
     async def run_task(self, task_id: uuid.UUID) -> Task:
-        """Run ``task_id`` to completion and return its final state."""
+        """Run ``task_id`` to completion and return its final state.
+
+        Each invocation is one *attempt*: the task is locked, its status is
+        guarded (terminal tasks return unchanged; running tasks raise), and
+        ``attempt`` is incremented and persisted with the RUNNING transition.
+        Status plus the incrementally persisted transcript form a durable
+        checkpoint: a failed run can be retried and a crashed run is never
+        silently lost. Cancellation is cooperative via the optional
+        ``cancellations`` registry, checked between steps.
+        """
         async with self._session_factory() as session:
-            task = await TaskRepository(session).get_for_run(task_id)
+            task = await TaskRepository(session).get_for_run(task_id, for_update=True)
             if task is None:
                 raise ValueError(f"no such task: {task_id}")
+            if task.status in _TERMINAL_STATUSES:
+                await self._discard_cancel(task.id)
+                return task
+            if task.status == TaskStatus.RUNNING:
+                raise ValueError(f"task already running: {task_id}")
 
-            workspace_dir = Path(task.session.workspace.repo_path)
+            task.status = TaskStatus.RUNNING
+            task.attempt += 1
+            task.started_at = _utcnow()
+            await session.commit()
+
             await self._emit(
                 OrchestratorEvent(task_id=task.id, kind="started", detail=task.goal),
             )
 
-            task.status = TaskStatus.RUNNING
-            task.started_at = _utcnow()
-            await session.commit()
-
+            workspace_dir = Path(task.session.workspace.repo_path)
             executor = self._executor_factory(workspace_dir)
             ordinal = await MessageRepository(session).max_ordinal(task.session_id)
 
@@ -135,11 +155,17 @@ class Orchestrator:
                 max_tokens=self._settings.llm_max_tokens,
                 temperature=self._settings.llm_temperature,
                 on_message=_append,
+                should_cancel=self._cancel_checked(task.id),
             )
             try:
                 result = await agent.run(task.goal)
+            except TaskCancelled:
+                return await self._cancel(session, task)
             except Exception as exc:
                 return await self._fail(session, task, exc)
+
+            if self._cancel_requested(task.id):
+                return await self._cancel(session, task)
 
             task.status = TaskStatus.COMPLETED
             task.result = result.answer
@@ -156,9 +182,42 @@ class Orchestrator:
                     detail=result.answer,
                 ),
             )
+            await self._discard_cancel(task.id)
+            return task
+
+    async def retry_task(self, task_id: uuid.UUID) -> Task:
+        """Reset a terminal task so it can be run again.
+
+        The task must be terminal (completed, failed, or cancelled) and must
+        not have exhausted ``max_attempts``. Its result, error, token counts,
+        and timestamps are cleared, the status returns to ``pending``, and
+        any pending cancellation is dropped so the next run starts fresh.
+        The caller schedules the new run (:meth:`run_task`), which consumes
+        another attempt. The prior transcript is preserved as durable
+        history; new messages append to it.
+        """
+        async with self._session_factory() as session:
+            task = await TaskRepository(session).get_for_run(task_id, for_update=True)
+            if task is None:
+                raise ValueError(f"no such task: {task_id}")
+            if task.status not in _TERMINAL_STATUSES:
+                raise ValueError(f"task is not in a retryable state: {task.status.value}")
+            if task.attempt >= task.max_attempts:
+                raise ValueError(f"max attempts ({task.max_attempts}) reached")
+            task.status = TaskStatus.PENDING
+            task.result = None
+            task.error = None
+            task.input_tokens = 0
+            task.output_tokens = 0
+            task.started_at = None
+            task.finished_at = None
+            await session.commit()
+            await self._discard_cancel(task.id)
             return task
 
     async def _fail(self, session: AsyncSession, task: Task, exc: Exception) -> Task:
+        if self._cancel_requested(task.id):
+            return await self._cancel(session, task)
         task.status = TaskStatus.FAILED
         task.error = f"{type(exc).__name__}: {exc}"
         task.finished_at = _utcnow()
@@ -166,7 +225,38 @@ class Orchestrator:
         await self._emit(
             OrchestratorEvent(task_id=task.id, kind="failed", detail=task.error),
         )
+        await self._discard_cancel(task.id)
         return task
+
+    async def _cancel(self, session: AsyncSession, task: Task) -> Task:
+        """Finalize a cancelled run, keeping any earlier terminal transition.
+
+        The cancel endpoint may already have persisted ``cancelled`` (crash-
+        safe); this only persists it again if the in-session status is stale
+        and then announces the transition so SSE clients close.
+        """
+        if task.status != TaskStatus.CANCELLED:
+            task.status = TaskStatus.CANCELLED
+            task.finished_at = _utcnow()
+            await session.commit()
+        await self._emit(
+            OrchestratorEvent(task_id=task.id, kind="cancelled", detail=task.error),
+        )
+        await self._discard_cancel(task.id)
+        return task
+
+    def _cancel_checked(self, task_id: uuid.UUID) -> Callable[[], bool]:
+        """Return the agent's cooperative cancellation predicate."""
+        return lambda: self._cancel_requested(task_id)
+
+    def _cancel_requested(self, task_id: uuid.UUID) -> bool:
+        if self._cancellations is None:
+            return False
+        return self._cancellations.is_requested(task_id)
+
+    async def _discard_cancel(self, task_id: uuid.UUID) -> None:
+        if self._cancellations is not None:
+            await self._cancellations.discard(task_id)
 
     async def _persist_message(
         self,

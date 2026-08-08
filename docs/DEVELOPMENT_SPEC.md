@@ -253,25 +253,86 @@ each new message and status transition live until the task terminates.
 
 ---
 
+## Step 9 — Retries, cancellation, and durable checkpoints (Phase 7)
+
+**Spec**
+
+Make task lifecycle operations explicit and durable: track how many times a
+task has run, allow a terminal task to be retried within a bound, and allow
+a pending/running task to be cancelled cooperatively. The task row (status +
+`attempt`) plus the incrementally persisted transcript form the durable
+checkpoint; a retry re-runs the same task and appends to the transcript.
+
+**Deliverables**
+
+- `app/orchestrator/cancellation.py` — `TaskCancelled` exception and
+  `CancellationRegistry`, an in-process per-task cancel flag (the stand-in
+  for a distributed signal) with `request_cancel` / `reset` / `discard`
+- `app/agents/coder.py` — optional `should_cancel` predicate checked at each
+  step boundary; raising `TaskCancelled` stops the loop at the next safe
+  point (cooperative cancellation, never mid-call)
+- `app/database/models/task.py` + `alembic/versions/0005_*.py` —
+  `tasks.attempt` (run counter, durable checkpoint) and `tasks.max_attempts`
+  (retry budget); `app/gateway/schemas.py` exposes both on `TaskResponse`
+- `app/orchestrator/orchestrator.py` — `run_task` guards terminal/running
+  tasks (row lock via `get_for_run(for_update=True)`) and increments
+  `attempt` with the RUNNING transition; new `retry_task` resets a terminal
+  task to `pending` (clearing error/result/timestamps, keeping the
+  transcript); `_cancel` finalizes `cancelled` and keeps any earlier
+  transition; `EventKind` gains `cancelled`
+- `app/gateway/routes/tasks.py` — `POST /tasks/{id}/retry` (resets a
+  terminal task and schedules a rerun, `409` if running or budget
+  exhausted) and `POST /tasks/{id}/cancel` (persists `cancelled` and records
+  the cooperative cancel, `409` for terminal tasks)
+- `app/core/config.py` — `task_max_attempts` default for new tasks;
+  `app/core/container.py` / `app/gateway/dependencies.py` — shared
+  `cancellations` registry wired through the container and
+  `CancellationRegistryDep`
+- `tests/unit/test_cancellation.py`; `should_cancel` unit tests; orchestrator
+  integration tests for attempt tracking, retry reset/rerun, guard rejections,
+  and in-flight cancellation; tasks API tests for both endpoints
+
+**Result**
+
+- 26 new tests; full suite at 138 passing.
+- `attempt` is incremented and persisted with each RUNNING transition, so a
+  crashed or failed run is never silently lost and a retry resumes from a
+  known state; `run_task` is guarded against double-runs via a row lock.
+- Retry preserves the prior transcript as durable history and appends the new
+  attempt; it is bounded by `max_attempts` (default `task_max_attempts`).
+- Cancellation is cooperative: the cancel endpoint persists `cancelled`
+  immediately (crash-safe) and sets the in-process flag; the running agent
+  stops at its next step boundary and emits a `cancelled` event. Automatic
+  retries on transient errors are deferred (they conflict with the
+  terminal-status SSE close) and remain future work.
+- One migration: `0005` adds `attempt` / `max_attempts` to `tasks`.
+
+---
+
 ## Final integrated result
 
-With all eight steps in place, an end-to-end request flow is verified:
+With all nine steps in place, an end-to-end request flow is verified:
 
-1. `POST /api/v1/sessions/{id}/tasks` creates a task (status `pending`) and
-   runs the LangGraph coder loop against the configured LLM in the
-   background, executing tools in the sandbox and persisting the transcript
-   incrementally.
+1. `POST /api/v1/sessions/{id}/tasks` creates a task (status `pending`,
+   `attempt 0`) and runs the LangGraph coder loop against the configured LLM
+   in the background, executing tools in the sandbox and persisting the
+   transcript incrementally.
 2. `GET /api/v1/sessions/{id}/tasks/{task_id}/events` replays the current
    state and then streams each message and status transition live until the
    task terminates.
-3. `GET /api/v1/tasks/{id}` returns the task with its full, ordered
-   transcript and token accounting.
-4. Every step is covered by tests, lint, and strict typing; the work is
+3. `POST /api/v1/tasks/{id}/cancel` cancels a pending or running task
+   durably; the agent stops at its next step boundary and emits a `cancelled`
+   event.
+4. `POST /api/v1/tasks/{id}/retry` resets a terminal task (clearing the
+   error, keeping the transcript) and re-runs it, bounded by
+   `max_attempts`; `attempt` is durable across every run.
+5. `GET /api/v1/tasks/{id}` returns the task with its full, ordered
+   transcript, attempt counter, and token accounting.
+6. Every step is covered by tests, lint, and strict typing; the work is
    committed and pushed to GitHub.
 
 ### What is intentionally out of scope (future phases)
 
-- Retries, cancellation, and durable checkpoints
 - Multi-agent pipeline: planner → coder → reviewer → tester
 - Authentication/authorization and user-facing session management
 - Retrieval (AST indexing + embeddings), memory, evals, monitoring

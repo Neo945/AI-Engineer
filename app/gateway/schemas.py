@@ -31,6 +31,8 @@ class TaskResponse(BaseModel):
     goal: str
     result: str | None
     error: str | None
+    attempt: int
+    max_attempts: int
     input_tokens: int
     output_tokens: int
     started_at: datetime | None

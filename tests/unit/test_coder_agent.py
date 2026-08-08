@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from typing import cast
 
+import pytest
 from tests.unit.fake_llm import FakeLLM
 
 from app.agents.coder import CoderAgent, format_tool_result
 from app.executor.executor import ToolExecutor
 from app.llm.messages import ChatMessage, ChatRole, ToolRequest
 from app.llm.protocol import LLMResponse, LLMUsage
+from app.orchestrator.cancellation import TaskCancelled
 from app.tools.schemas import ToolCall, ToolName, ToolResult, ToolSpec
 
 
@@ -276,6 +278,28 @@ async def test_agent_streams_unknown_tool_message() -> None:
     tool_message = streamed[2]
     assert tool_message.role == ChatRole.TOOL
     assert "unknown tool" in tool_message.content
+
+
+async def test_agent_raises_task_cancelled_when_hook_requests_cancel() -> None:
+    executor = cast(ToolExecutor, _StubExecutor())
+    fake = FakeLLM([_final_response("Done.")])
+
+    agent = CoderAgent(llm=fake, executor=executor, should_cancel=lambda: True)
+
+    with pytest.raises(TaskCancelled):
+        await agent.run("Do it")
+    assert fake.calls == []
+
+
+async def test_agent_proceeds_when_cancel_not_requested() -> None:
+    executor = cast(ToolExecutor, _StubExecutor())
+    fake = FakeLLM([_final_response("Done.")])
+
+    agent = CoderAgent(llm=fake, executor=executor, should_cancel=lambda: False)
+    result = await agent.run("Do it")
+
+    assert result.answer == "Done."
+    assert len(fake.calls) == 1
 
 
 async def test_agent_invokes_async_on_message_hook() -> None:

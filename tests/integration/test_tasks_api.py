@@ -6,9 +6,10 @@ PostgreSQL. They require PostgreSQL and Redis on localhost (``make up``).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from typing import cast
 
 import pytest
@@ -19,6 +20,7 @@ from tests.unit.fake_llm import FakeLLM
 
 from app.core.config import Settings
 from app.core.container import Container
+from app.database.models.enums import TaskStatus
 from app.database.models.session import Session
 from app.database.models.task import Task
 from app.database.models.user import User
@@ -27,7 +29,7 @@ from app.database.repositories.task import TaskRepository
 from app.executor.executor import ToolExecutor
 from app.gateway.dependencies import get_orchestrator
 from app.gateway.main import create_app
-from app.llm.messages import ToolRequest
+from app.llm.messages import ChatMessage, ToolRequest
 from app.llm.protocol import LLMProvider, LLMResponse, LLMUsage
 from app.orchestrator.orchestrator import Orchestrator
 from app.tools.schemas import ToolCall, ToolName, ToolResult, ToolSpec
@@ -89,6 +91,34 @@ def _final_response(content: str, *, input_tokens: int = 5, output_tokens: int =
     )
 
 
+class _FlakyLLM(FakeLLM):
+    """Fails the first call, then behaves like a normal scripted LLM."""
+
+    def __init__(self, responses: list[LLMResponse]) -> None:
+        super().__init__(responses)
+        self._fail_first = True
+
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec],
+        system: str | None = None,
+        max_tokens: int,
+        temperature: float,
+    ) -> LLMResponse:
+        if self._fail_first:
+            self._fail_first = False
+            raise RuntimeError("boom")
+        return await super().complete(
+            messages,
+            tools=tools,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+
 async def _seed_session(db_session: AsyncSession) -> uuid.UUID:
     user = User(email="tasks-api@example.com")
     db_session.add(user)
@@ -129,6 +159,7 @@ def use_fake_llm(app: FastAPI, container: Container) -> Callable[[LLMProvider], 
                 llm=llm,
                 settings=container.settings,
                 event_broker=container.event_broker,
+                cancellations=container.cancellations,
                 executor_factory=lambda _workspace_dir: cast(ToolExecutor, _StubExecutor()),
             )
 
@@ -369,3 +400,154 @@ async def test_task_events_for_missing_session_returns_404(client: AsyncClient) 
     response = await client.get(f"/api/v1/sessions/{uuid.uuid4()}/tasks/{uuid.uuid4()}/events")
     assert response.status_code == 404
     assert response.json()["detail"] == "session not found"
+
+
+async def test_retry_task_reruns_failed_task(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    use_fake_llm: Callable[[LLMProvider], None],
+) -> None:
+    session_id = await _seed_session(db_session)
+    use_fake_llm(_FlakyLLM([_final_response("Fixed.")]))
+
+    created = await client.post(
+        f"/api/v1/sessions/{session_id}/tasks",
+        json={"goal": "Fix the bug"},
+    )
+    assert created.status_code == 202
+    task_id = created.json()["id"]
+    assert created.json()["status"] == "pending"
+    assert created.json()["attempt"] == 0
+    assert created.json()["max_attempts"] == 3
+
+    detail = await client.get(f"/api/v1/tasks/{task_id}")
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "failed"
+    assert detail.json()["attempt"] == 1
+    assert detail.json()["error"] == "RuntimeError: boom"
+
+    retried = await client.post(f"/api/v1/tasks/{task_id}/retry")
+    assert retried.status_code == 202
+    assert retried.json()["status"] == "pending"
+    assert retried.json()["attempt"] == 1
+
+    detail = await client.get(f"/api/v1/tasks/{task_id}")
+    body = detail.json()
+    for _ in range(50):
+        if body["status"] in ("completed", "failed"):
+            break
+        await asyncio.sleep(0.05)
+        body = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert body["status"] == "completed"
+    assert body["attempt"] == 2
+    assert body["result"] == "Fixed."
+    assert body["error"] is None
+    assert [(m["role"], m["content"]) for m in body["messages"]] == [
+        ("user", "Fix the bug"),
+        ("user", "Fix the bug"),
+        ("assistant", "Fixed."),
+    ]
+
+
+async def test_retry_task_rejects_running_task(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    use_fake_llm: Callable[[LLMProvider], None],
+) -> None:
+    use_fake_llm(FakeLLM())
+    session_id = await _seed_session(db_session)
+    task = await TaskRepository(db_session).add(
+        Task(session_id=session_id, agent_type="coder", goal="Running")
+    )
+    task.status = TaskStatus.RUNNING
+    await db_session.commit()
+
+    response = await client.post(f"/api/v1/tasks/{task.id}/retry")
+    assert response.status_code == 409
+    assert "not in a retryable state" in response.json()["detail"]
+
+
+async def test_retry_task_rejects_at_max_attempts(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    use_fake_llm: Callable[[LLMProvider], None],
+) -> None:
+    use_fake_llm(FakeLLM())
+    session_id = await _seed_session(db_session)
+    task = await TaskRepository(db_session).add(
+        Task(session_id=session_id, agent_type="coder", goal="Exhausted")
+    )
+    task.status = TaskStatus.FAILED
+    task.attempt = task.max_attempts
+    await db_session.commit()
+
+    response = await client.post(f"/api/v1/tasks/{task.id}/retry")
+    assert response.status_code == 409
+    assert "max attempts" in response.json()["detail"]
+
+
+async def test_retry_task_not_found(
+    client: AsyncClient,
+    use_fake_llm: Callable[[LLMProvider], None],
+) -> None:
+    use_fake_llm(FakeLLM())
+    response = await client.post(f"/api/v1/tasks/{uuid.uuid4()}/retry")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "task not found"
+
+
+async def test_cancel_task_pending(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    session_id = await _seed_session(db_session)
+    task = await TaskRepository(db_session).add(
+        Task(session_id=session_id, agent_type="coder", goal="Never run")
+    )
+    await db_session.commit()
+
+    response = await client.post(f"/api/v1/tasks/{task.id}/cancel")
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["finished_at"] is not None
+
+
+async def test_cancel_task_running(
+    app: FastAPI,
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    session_id = await _seed_session(db_session)
+    task = await TaskRepository(db_session).add(
+        Task(session_id=session_id, agent_type="coder", goal="In flight")
+    )
+    task.status = TaskStatus.RUNNING
+    await db_session.commit()
+
+    response = await client.post(f"/api/v1/tasks/{task.id}/cancel")
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["finished_at"] is not None
+    assert app.state.container.cancellations.is_requested(task.id) is True
+
+
+async def test_cancel_task_already_finished_returns_409(
+    client: AsyncClient,
+    db_session: AsyncSession,
+) -> None:
+    session_id = await _seed_session(db_session)
+    task = await TaskRepository(db_session).add(
+        Task(session_id=session_id, agent_type="coder", goal="Done")
+    )
+    task.status = TaskStatus.COMPLETED
+    await db_session.commit()
+
+    response = await client.post(f"/api/v1/tasks/{task.id}/cancel")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "task already finished"
+
+
+async def test_cancel_task_not_found(client: AsyncClient) -> None:
+    response = await client.post(f"/api/v1/tasks/{uuid.uuid4()}/cancel")
+    assert response.status_code == 404
+    assert response.json()["detail"] == "task not found"

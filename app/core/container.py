@@ -20,6 +20,7 @@ from app.database.engine import build_async_engine
 from app.database.session import create_session_factory
 from app.llm.factory import build_llm_client
 from app.orchestrator.broker import EventBroker
+from app.orchestrator.cancellation import CancellationRegistry
 from app.orchestrator.orchestrator import Orchestrator
 
 _DEFAULT_POOL_SIZE: Final = 10
@@ -36,6 +37,7 @@ class Container:
         session_factory: Factory producing request-scoped ``AsyncSession``.
         redis: Async Redis client (cache, rate limits, pub/sub).
         event_broker: In-process fan-out for orchestrator events.
+        cancellations: In-process registry of pending task cancellations.
     """
 
     settings: Settings
@@ -43,6 +45,7 @@ class Container:
     session_factory: async_sessionmaker[AsyncSession]
     redis: Redis
     event_broker: EventBroker = field(default_factory=EventBroker)
+    cancellations: CancellationRegistry = field(default_factory=CancellationRegistry)
     _orchestrator: Orchestrator | None = field(init=False, default=None, repr=False)
 
     @classmethod
@@ -87,5 +90,6 @@ class Container:
                 llm=llm,
                 settings=self.settings,
                 event_broker=self.event_broker,
+                cancellations=self.cancellations,
             )
         return self._orchestrator

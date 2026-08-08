@@ -18,6 +18,7 @@ from langgraph.graph import END, START, StateGraph
 from app.executor.executor import ToolExecutor
 from app.llm.messages import ChatMessage, ChatRole, ToolRequest
 from app.llm.protocol import LLMProvider
+from app.orchestrator.cancellation import TaskCancelled
 from app.tools.schemas import ToolCall, ToolName, ToolResult
 
 _DEFAULT_SYSTEM_PROMPT = (
@@ -77,6 +78,9 @@ class CoderAgent:
         on_message: Optional callback invoked with every produced message
             (the goal, each assistant turn, and each tool result) in
             transcript order, as it is produced.
+        should_cancel: Optional predicate checked at each step boundary;
+            when it returns ``True`` the run raises :class:`TaskCancelled`
+            and stops at the next safe point (cooperative cancellation).
     """
 
     def __init__(
@@ -89,6 +93,7 @@ class CoderAgent:
         max_tokens: int = 4096,
         temperature: float = 0.0,
         on_message: Callable[[ChatMessage], Awaitable[None] | None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         self._llm = llm
         self._executor = executor
@@ -97,6 +102,7 @@ class CoderAgent:
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._on_message = on_message
+        self._should_cancel = should_cancel
         self._graph = self._build_graph()
 
     def _build_graph(self) -> Any:
@@ -158,6 +164,8 @@ class CoderAgent:
         return "end"
 
     async def _step(self, state: CoderState) -> dict[str, Any]:
+        if self._should_cancel is not None and self._should_cancel():
+            raise TaskCancelled()
         response = await self._llm.complete(
             state.get("messages") or [],
             tools=self._executor.registry.specs(),

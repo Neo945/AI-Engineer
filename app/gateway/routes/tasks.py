@@ -6,6 +6,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Sequence
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -18,7 +19,13 @@ from app.database.models.task import Task
 from app.database.repositories.message import MessageRepository
 from app.database.repositories.session import SessionRepository
 from app.database.repositories.task import TaskRepository
-from app.gateway.dependencies import EventBrokerDep, OrchestratorDep, SessionDep
+from app.gateway.dependencies import (
+    CancellationRegistryDep,
+    ContainerDep,
+    EventBrokerDep,
+    OrchestratorDep,
+    SessionDep,
+)
 from app.gateway.schemas import (
     MessageResponse,
     TaskCreateRequest,
@@ -60,16 +67,23 @@ async def create_and_run_task(
     db: SessionDep,
     session: SessionOr404Dep,
     orchestrator: OrchestratorDep,
+    container: ContainerDep,
 ) -> Task:
     """Create a task for a session and kick off its run in the background.
 
     The response is returned as soon as the task is created (status
     ``pending``); the agent then executes asynchronously. Clients can watch
     progress on ``GET /sessions/{session_id}/tasks/{task_id}/events`` (SSE)
-    or poll ``GET /tasks/{task_id}`` for the persisted transcript.
+    or poll ``GET /tasks/{task_id}`` for the persisted transcript. A task is
+    retryable up to ``task_max_attempts`` times.
     """
     task = await TaskRepository(db).add(
-        Task(session_id=session_id, agent_type=body.agent_type, goal=body.goal)
+        Task(
+            session_id=session_id,
+            agent_type=body.agent_type,
+            goal=body.goal,
+            max_attempts=container.settings.task_max_attempts,
+        )
     )
     await db.commit()
 
@@ -103,6 +117,61 @@ async def get_task_detail(
         **TaskResponse.model_validate(task).model_dump(),
         messages=[MessageResponse.model_validate(message) for message in messages],
     )
+
+
+@router.post(
+    "/tasks/{task_id}/retry",
+    response_model=TaskResponse,
+    status_code=202,
+)
+async def retry_task(
+    task_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: SessionDep,
+    orchestrator: OrchestratorDep,
+) -> Task:
+    """Reset a terminal task and schedule it to run again.
+
+    The task must be finished (completed, failed, or cancelled) and must not
+    have exhausted its attempt budget; otherwise the request is rejected with
+    ``409``. The prior transcript is preserved and the new run appends to it.
+    """
+    task = await TaskRepository(db).get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    try:
+        await orchestrator.retry_task(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    background_tasks.add_task(orchestrator.run_task, task_id)
+    await db.refresh(task)
+    return task
+
+
+@router.post("/tasks/{task_id}/cancel", response_model=TaskResponse)
+async def cancel_task(
+    task_id: uuid.UUID,
+    db: SessionDep,
+    cancellations: CancellationRegistryDep,
+) -> Task:
+    """Cancel a pending or running task.
+
+    The status is persisted as ``cancelled`` immediately (crash-safe), and a
+    cooperative cancel is recorded so an in-flight run stops at its next step
+    boundary and emits a ``cancelled`` event. Terminal tasks cannot be
+    cancelled (``409``).
+    """
+    task = await TaskRepository(db).get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task.status in _TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail="task already finished")
+    task.status = TaskStatus.CANCELLED
+    task.finished_at = datetime.now(UTC)
+    await db.commit()
+    await cancellations.request_cancel(task_id)
+    await db.refresh(task)
+    return task
 
 
 @router.get("/sessions/{session_id}/tasks/{task_id}/events")

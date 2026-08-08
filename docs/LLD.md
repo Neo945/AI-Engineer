@@ -84,6 +84,7 @@ tasks
   agent_type varchar(50) | status task_status (pending|planning|running|reviewing|testing|
                                              completed|failed|cancelled)
   goal TEXT | result TEXT? | error TEXT?
+  attempt int (0) | max_attempts int (3)             # durable retry checkpoint
   input_tokens int (0) | output_tokens int (0)
   started_at timestamptz? | finished_at timestamptz? | created_at | updated_at
 
@@ -118,6 +119,7 @@ code_chunks                                # retrieval-scaffolded (Phase 9)
 | 0002 | Core schema: users, workspaces, sessions, tasks, messages, code_chunks, enums |
 | 0003 | `messages.tool_call_id`, `messages.tool_calls` (JSONB) |
 | 0004 | `messages.ordinal` int + index |
+| 0005 | `tasks.attempt`, `tasks.max_attempts` (retry/checkpoint metadata) |
 
 ## 3. Class design
 
@@ -129,6 +131,8 @@ code_chunks                                # retrieval-scaffolded (Phase 9)
   engine: AsyncEngine
   session_factory: async_sessionmaker[AsyncSession]
   redis: Redis
+  event_broker: EventBroker = field(default_factory=EventBroker)
+  cancellations: CancellationRegistry = field(default_factory=CancellationRegistry)
   _orchestrator: Orchestrator | None = field(init=False, default=None, repr=False)
 
   @classmethod build(settings=None) -> Container     # engine + session factory + redis
@@ -251,26 +255,38 @@ caller can persist/stream each entry as it is produced.
 ### 3.6 Orchestrator — `app/orchestrator/orchestrator.py`
 
 ```
-EventKind = Literal["started","message","completed","failed"]
+EventKind = Literal["started","message","completed","failed","cancelled"]
 OrchestratorEvent(task_id, kind, message: ChatMessage|None = None,
                   detail: str|None = None, ordinal: int|None = None)
   # frozen dataclass; "message" events carry the persisted entry + its ordinal
 
+_TERMINAL_STATUSES = {completed, failed, cancelled}
+
 Orchestrator(session_factory, llm, settings, on_event=None,
-             event_broker=None, executor_factory=None)
+             event_broker=None, cancellations=None, executor_factory=None)
   async run_task(task_id) -> Task
-  #   1. get_for_run (eager session+workspace) else ValueError
-  #   2. emit "started"; status=RUNNING; started_at=now; commit
-  #   3. executor = executor_factory(workspace_dir) | ToolExecutor.build(...)
-  #   4. ordinal_base = max_ordinal(session)   # -1 for an empty session
-  #   5. _append(msg): ordinal_base+=1; persist Message(ordinal); commit;
+  #   1. get_for_run(for_update=True)  # row lock → status guard is atomic
+  #        else ValueError; if terminal → return unchanged (noop for retries);
+  #        if RUNNING → ValueError ("task already running")
+  #   2. status=RUNNING; attempt+=1; started_at=now; commit   # durable checkpoint
+  #   3. emit "started"
+  #   4. executor = executor_factory(workspace_dir) | ToolExecutor.build(...)
+  #   5. ordinal_base = max_ordinal(session)   # -1 for an empty session
+  #   6. _append(msg): ordinal_base+=1; persist Message(ordinal); commit;
   #        emit "message" event          ← CoderAgent.on_message hook
-  #   6. agent = CoderAgent(llm, executor, max_tokens, temperature, on_message=_append)
-  #   7. try: result = await agent.run(task.goal)
-  #        except Exception → _fail (status=FAILED, error, finished_at, emit "failed")
-  #   8. status=COMPLETED; result=answer; tokens; finished_at; commit
-  #   9. emit "completed"
-  _fail(session, task, exc) -> Task
+  #   7. agent = CoderAgent(llm, executor, ..., on_message=_append,
+  #        should_cancel=is_requested(task_id))     # cooperative cancel
+  #   8. try: result = await agent.run(task.goal)
+  #        except TaskCancelled → _cancel
+  #        except Exception     → _fail
+  #   9. if cancellation requested → _cancel
+  #  10. status=COMPLETED; result=answer; tokens; finished_at; commit; emit "completed"
+  async retry_task(task_id) -> Task
+  #   get_for_run(for_update=True); must be terminal else ValueError;
+  #   attempt >= max_attempts → ValueError; else status=PENDING, clear
+  #   result/error/tokens/timestamps, commit, discard cancel state
+  _fail(session, task, exc) -> Task   # cancelled? → _cancel; else FAILED+error+emit "failed"
+  _cancel(session, task) -> Task      # CANCELLED (keep prior transition) + emit "cancelled"
   _persist_message(session, task, message, ordinal) -> None   # + commit
   _serialize_tool_calls(requests) -> list[dict]|None    # model_dump per request
   _emit(event) -> None   # publish to event_broker (best-effort), then on_event
@@ -282,6 +298,34 @@ message with an immediate commit** (rather than batched at the end), so each
 entry is durably visible to concurrent readers while the task is still
 running; a failure therefore keeps the partial transcript. `MessageRole(message.role.value)`
 bridges ChatRole → MessageRole (same values).
+
+Retry/cancel semantics:
+- `attempt` is incremented and committed with each RUNNING transition; status
+  + transcript are the durable checkpoint, so a crash mid-run is never
+  silently lost and `run_task` can be re-invoked safely (terminal → noop).
+- `retry_task` keeps the prior transcript (new attempts append ordinals after
+  it) and only clears the terminal columns; it is bounded by `max_attempts`.
+- Cancellation is cooperative: the cancel endpoint persists `cancelled`
+  immediately (crash-safe) and sets the registry flag; the agent checks
+  `should_cancel` at each step boundary and raises `TaskCancelled`, which
+  `run_task` turns into the final `cancelled` transition (keeping any that
+  the endpoint already persisted).
+
+### CancellationRegistry — `app/orchestrator/cancellation.py`
+
+```
+TaskCancelled(Exception)          # raised between agent steps on cancel
+CancellationRegistry              # in-process stand-in for a distributed flag
+  _events: dict[uuid.UUID, asyncio.Event];  _lock: asyncio.Lock
+  async reset(task_id)            # drop a prior request for a fresh run (retry)
+  async request_cancel(task_id)   # create (if absent) + set the event
+  is_requested(task_id) -> bool   # sync; read by the agent's should_cancel hook
+  async discard(task_id)          # release state at a terminal status (idempotent)
+```
+
+One shared instance lives on the `Container`; the orchestrator reads it and
+the cancel route writes it via `CancellationRegistryDep`. Like `EventBroker`,
+it is the single-process stand-in for a distributed signal.
 
 ### EventBroker — `app/orchestrator/broker.py`
 
@@ -305,31 +349,40 @@ dependencies.py
   get_container(request) -> Container
   async get_db_session(container) -> AsyncIterator[AsyncSession]
   get_event_broker(container) -> EventBroker          # shared broker
+  get_cancellation_registry(container) -> CancellationRegistry
   get_orchestrator(container) -> Orchestrator   # 503 "LLM is not configured" on any build error
-  ContainerDep / SessionDep / EventBrokerDep / OrchestratorDep
+  ContainerDep / SessionDep / EventBrokerDep / CancellationRegistryDep / OrchestratorDep
 
 routes/tasks.py
   async get_session_or_404(session_id, db) -> Session    # 404 dependency
   POST /sessions/{session_id}/tasks   → 202 TaskResponse
        body TaskCreateRequest{goal 1..4000, agent_type default "coder"}
-       create task (PENDING) → commit →
+       create task (PENDING, max_attempts=settings.task_max_attempts) → commit →
          BackgroundTasks.add_task(orchestrator.run_task, task.id) → return
   GET  /sessions/{session_id}/tasks   → list[TaskResponse]  (limit 1..500, offset ≥ 0)
   GET  /tasks/{task_id}               → TaskDetailResponse (task + ordered transcript)
+  POST /tasks/{task_id}/retry         → 202 TaskResponse
+       must be terminal (completed/failed/cancelled) and attempt < max_attempts
+       (else 409); orchestrator.retry_task resets to PENDING (keeps transcript) →
+         BackgroundTasks.add_task(run_task, task.id) → return (db.refresh)
+  POST /tasks/{task_id}/cancel        → 200 TaskResponse
+       terminal → 409; else status=CANCELLED + finished_at commit,
+       cancellations.request_cancel(task_id), return (db.refresh)
   GET  /sessions/{session_id}/tasks/{task_id}/events → text/event-stream
        replay (snapshot on status change + persisted messages) then live,
        15s keepalive comments, closes on a terminal status (completed/failed/
        cancelled). DB is the source of truth; broker events only wake the loop.
 
 schemas.py
-  TaskCreateRequest; TaskResponse(from_attributes); MessageResponse(from_attributes);
+  TaskCreateRequest; TaskResponse(from_attributes, + attempt/max_attempts);
+  MessageResponse(from_attributes);
   TaskDetailResponse(TaskResponse + messages: list[MessageResponse])
 ```
 
-SSE frame format: `event: snapshot|message|completed|failed\n` + `data: {json}`.
-`snapshot`/terminal frames carry a full `TaskResponse`; `message` frames
-carry a full `MessageResponse`. Headers: `text/event-stream`, `Cache-Control:
-no-cache`, `X-Accel-Buffering: no`.
+SSE frame format: `event: snapshot|message|completed|failed|cancelled\n` +
+`data: {json}`. `snapshot`/terminal frames carry a full `TaskResponse`;
+`message` frames carry a full `MessageResponse`. Headers: `text/event-stream`,
+`Cache-Control: no-cache`, `X-Accel-Buffering: no`.
 
 Subtle behaviors (enforced by tests):
 - `get_session_or_404` is declared **before** `OrchestratorDep` so a missing
@@ -416,19 +469,40 @@ Client  Gateway  Orchestrator  CoderAgent  LLM  ToolExecutor  Sandbox  Postgres 
   │       │   (response sent; client opens SSE)     │         │          │       │
   │◀──────│  202 TaskResponse                       │         │          │       │
   │       │ run_task(task_id)                       │         │          │       │
-  │       │──▶│ get_for_run (eager) ──────────────────────────────────────▶│       │
-  │       │   │ status=RUNNING ───────────────────────────────────────────▶│       │
-  │       │   │ ordinal_base = max_ordinal ───────────────────────────────▶│       │
+  │       │──▶│ get_for_run(for_update=True) ───────────────────────────────▶│       │
+  │       │   │ status=RUNNING; attempt+=1 ─────────────────────────────────▶│       │
+  │       │   │ ordinal_base = max_ordinal ─────────────────────────────────▶│       │
   │       │   │ agent.run(goal) ──────────▶│         │          │         │       │
   │       │   │   on_message(goal)  ──────▶│ persist+commit (ordinal) ───▶│ emit ▶│
   │       │   │   complete(msgs, tools) ─────────▶│       │          │     │       │
   │       │   │   tool_requests ◀──────────────────│       │          │     │       │
+  │       │   │   should_cancel? ──(no)──▶        │       │          │     │       │
   │       │   │   execute(ToolCall) ───────────────────▶│  get_or_start/run │     │
   │       │   │   on_message(assistant+tool) ───▶│ persist+commit ────────▶│ emit ▶│
   │       │   │   final answer ◀──────────────────│       │          │     │       │
   │       │   │ status=COMPLETED ─────────────────────────────────────────▶│       │
   │       │   │ emit completed ───────────────────────────────────────────▶│       │
   │       │ SSE stream: snapshot + messages + completed (from DB truth)           │
+```
+
+Cancel/retry flows:
+```
+Client  Gateway  CancellationRegistry  Orchestrator  CoderAgent  Postgres
+  POST /tasks/{id}/cancel
+  ├──▶│ (running?)  │         │             │            │        │
+  │   │ status=CANCELLED + finished_at ───────────────────────────▶│ (commit)
+  │   │ request_cancel(task_id) ──▶│(set flag)    │            │
+  │   │◀── TaskResponse(cancelled) │         │             │            │
+  │   │   (agent at next step boundary)         │            │        │
+  │   │   should_cancel() ──▶│(is_requested → True)        │        │
+  │   │   raise TaskCancelled ───▶│         │            │        │
+  │   │   _cancel (keep CANCELLED) ──────────────────────────▶│ (commit)
+  │   │   emit "cancelled" ───────────────────────────────────▶│
+  POST /tasks/{id}/retry  (terminal + attempt < max_attempts)
+  ├──▶│ status=PENDING; clear result/error/tokens/timestamps ──▶│ (commit)
+  │   │ discard(task_id) ──▶│(clear cancel flag)  │            │
+  │   │ BackgroundTasks.run_task(task_id) → PENDING→RUNNING (attempt+1)
+  │   │◀── 202 TaskResponse(pending)      (transcript retained)
 ```
 
 ### 4.2 Terminal tool call (sandbox)
@@ -462,9 +536,21 @@ ToolExecutor._terminal_run
 
 ### 5.2 Orchestrator lifecycle
 
-`PENDING → RUNNING → COMPLETED | FAILED`, plus `started_at`/`finished_at`.
-Failure is captured as `"TypeName: message"` in `task.error`; the exception
-is not re-raised. Success writes `result`, `input_tokens`, `output_tokens`.
+`PENDING → RUNNING → COMPLETED | FAILED | CANCELLED`, plus
+`started_at`/`finished_at`. Each RUNNING transition increments and persists
+`attempt` (durable checkpoint). Failure is captured as
+`"TypeName: message"` in `task.error`; the exception is not re-raised.
+Success writes `result`, `input_tokens`, `output_tokens`.
+
+Retry: `retry_task` moves a terminal task back to `PENDING` (clearing
+`result`/`error`/token counts/timestamps, keeping the transcript) for
+another `run_task`, guarded by `attempt < max_attempts`. A retry's messages
+continue the session ordinals, so the transcript preserves every attempt.
+
+Cancel (cooperative): the endpoint persists `CANCELLED` + `finished_at` and
+sets the registry flag; the running agent's `should_cancel` check raises
+`TaskCancelled` at the next step boundary; `run_task` finalizes via `_cancel`
+(keeping an already-persisted `CANCELLED`).
 
 ### 5.3 Transcript persistence (incremental)
 
@@ -534,6 +620,7 @@ per-task cost accounting.
 | `LLM_MAX_TOKENS` | `4096` | ≥1 |
 | `LLM_TEMPERATURE` | `0` | 0..2 |
 | `LLM_TIMEOUT_SECONDS` | `120` | ≥1 |
+| `TASK_MAX_ATTEMPTS` | `3` | retry budget per task (≥1) |
 
 ## 7. API contract
 
@@ -544,11 +631,13 @@ per-task cost accounting.
 | POST | `/api/v1/sessions/{session_id}/tasks` | 202 `TaskResponse` (status `pending`); runs in background | 404 session, 422 body, 503 LLM unconfigured |
 | GET | `/api/v1/sessions/{session_id}/tasks?limit&offset` | 200 `[TaskResponse]` | 404 session |
 | GET | `/api/v1/tasks/{task_id}` | 200 `TaskDetailResponse` | 404 task |
+| POST | `/api/v1/tasks/{task_id}/retry` | 202 `TaskResponse` (status `pending`); reruns in background | 404 task, 409 not terminal / max attempts |
+| POST | `/api/v1/tasks/{task_id}/cancel` | 200 `TaskResponse` (status `cancelled`) | 404 task, 409 terminal |
 | GET | `/api/v1/sessions/{session_id}/tasks/{task_id}/events` | 200 `text/event-stream` (snapshot + messages + terminal) | 404 session, 404 task |
 
 `TaskResponse`: `id, session_id, parent_task_id, agent_type, status, goal,
-result, error, input_tokens, output_tokens, started_at, finished_at,
-created_at, updated_at`.
+result, error, attempt, max_attempts, input_tokens, output_tokens,
+started_at, finished_at, created_at, updated_at`.
 
 `TaskDetailResponse` = TaskResponse + `messages: [{id, session_id, task_id,
 role, content, ordinal, tool_call_id, tool_calls, token_count, created_at}]`
@@ -563,10 +652,11 @@ ordered by ordinal.
 | ToolRegistry | Unknown tool / invalid args / handler exception → `ToolResult(ok=False, error=…)`; never raises |
 | Sandbox | Timeout → kill + container destroyed + `timed_out=True`; DockerError → `ok=False` sandbox error |
 | Executor | Per-tool errors returned as results; terminal/git timeout → `ok=False` with message |
-| CoderAgent | Unknown tool name → TOOL message `"unknown tool: …"`; loop always terminates |
-| Orchestrator | Agent exceptions → `task.status=FAILED` + `error`; **not re-raised**; missing task → `ValueError` |
+| CoderAgent | Unknown tool name → TOOL message `"unknown tool: …"`; loop always terminates; `should_cancel` → raises `TaskCancelled` |
+| Orchestrator | Agent exceptions → `task.status=FAILED` + `error`; **not re-raised**; missing task → `ValueError`; running/terminal task → guarded (terminal = noop, running = `ValueError`); `retry_task` → `ValueError` on non-terminal/max-attempts |
+| CancellationRegistry | No-ops on unknown/terminal tasks (`reset`/`discard` idempotent); `is_requested` reads without raising |
 | EventBroker | Best-effort publish: `QueueFull`/slow subscriber dropped, never raises |
-| Gateway | 404 session/task, 422 validation, 503 LLM unconfigured (dependency), 202/200 otherwise; SSE closes on disconnect via `finally` unsubscribe |
+| Gateway | 404 session/task, 409 retry/cancel conflicts, 422 validation, 503 LLM unconfigured (dependency), 202/200 otherwise; SSE closes on disconnect via `finally` unsubscribe |
 
 ## 9. Test strategy
 
@@ -598,6 +688,11 @@ fixtures, autouse table truncation.
   orchestrator are split, or add per-LLM-call token/text events.
 - **Planner/reviewer/tester**: add LangGraph nodes/states composing
   `CoderAgent`-style loops; `Task.parent_task_id` already models the tree.
-- **Retries/cancellation/checkpoints**: extend `Orchestrator.run_task` and
-  `Task`/`Session` status transitions.
+- **Automatic retries**: wire a bounded retry loop over `Orchestrator.run_task`
+  for transient (retryable) failures — deferred because a terminal FAILED
+  closes the SSE stream; add a retryable-error taxonomy + backoff when
+  non-terminal retry markers are wanted.
+- **Distributed cancel/signal**: swap `CancellationRegistry` for a shared
+  store (Redis) with the same interface when the gateway and orchestrator
+  split.
 - **Retrieval**: `CodeChunk` + pgvector are already in the schema.
