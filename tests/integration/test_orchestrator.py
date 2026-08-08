@@ -173,6 +173,7 @@ async def _seed_task(
     *,
     workspace_dir: str,
     goal: str = "Fix the bug",
+    agent_type: str = "coder",
 ) -> Task:
     user = User(email="orchestrator@example.com")
     db_session.add(user)
@@ -183,7 +184,7 @@ async def _seed_task(
     agent_session = Session(workspace_id=workspace.id, user_id=user.id)
     db_session.add(agent_session)
     await db_session.flush()
-    task = Task(session_id=agent_session.id, agent_type="coder", goal=goal)
+    task = Task(session_id=agent_session.id, agent_type=agent_type, goal=goal)
     db_session.add(task)
     await db_session.commit()
     return task
@@ -541,3 +542,79 @@ async def test_cancel_task_aborts_running_agent(
         "message",
         "cancelled",
     ]
+
+
+async def test_run_task_runs_multi_agent_pipeline(
+    container: Container,
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    task = await _seed_task(db_session, workspace_dir=str(tmp_path), agent_type="pipeline")
+    fake = FakeLLM(
+        [
+            _final_response("Plan: 1. Inspect. 2. Fix."),
+            _final_response("Fixed the bug."),
+            _final_response("VERDICT: PASS\nLooks good."),
+            _final_response("VERDICT: PASS\nTests green."),
+        ]
+    )
+    events: list[OrchestratorEvent] = []
+    orchestrator = await _build_orchestrator(container, llm=fake, events=events)
+
+    await orchestrator.run_task(task.id)
+
+    async with container.session_factory() as fresh:
+        done = await TaskRepository(fresh).get(task.id)
+        persisted = await MessageRepository(fresh).list_by_session(task.session_id)
+    assert done is not None
+    assert done.status == TaskStatus.COMPLETED
+    assert done.result == "VERDICT: PASS\nTests green."
+    assert done.error is None
+    assert done.input_tokens == 20
+    assert done.output_tokens == 8
+    assert done.attempt == 1
+    assert [message.role for message in persisted] == [
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.ASSISTANT,
+        MessageRole.ASSISTANT,
+        MessageRole.ASSISTANT,
+    ]
+    assert [message.content for message in persisted] == [
+        "Fix the bug",
+        "Plan: 1. Inspect. 2. Fix.",
+        "Fixed the bug.",
+        "VERDICT: PASS\nLooks good.",
+        "VERDICT: PASS\nTests green.",
+    ]
+    assert [event.kind for event in events] == [
+        "started",
+        "message",
+        "message",
+        "message",
+        "message",
+        "message",
+        "completed",
+    ]
+    assert events[-1].detail == "VERDICT: PASS\nTests green."
+
+
+async def test_run_task_fails_unsupported_agent_type(
+    container: Container,
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    task = await _seed_task(db_session, workspace_dir=str(tmp_path), agent_type="debugger")
+    orchestrator = await _build_orchestrator(
+        container, llm=FakeLLM([_final_response("Done.")]), events=[]
+    )
+
+    await orchestrator.run_task(task.id)
+
+    async with container.session_factory() as fresh:
+        done = await TaskRepository(fresh).get(task.id)
+    assert done is not None
+    assert done.status == TaskStatus.FAILED
+    assert done.error == "ValueError: unsupported agent_type: debugger"
+    assert done.attempt == 1
+    assert done.finished_at is not None

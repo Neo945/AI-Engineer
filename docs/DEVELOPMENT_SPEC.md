@@ -7,10 +7,10 @@ to achieve), the **deliverables** (what was built), and the **result**
 
 Final state at the time of writing:
 
-- **Tests:** 112 passing (unit + integration + sandbox)
+- **Tests:** 150 passing (unit + integration + sandbox)
 - **Linting:** `ruff` clean, `ruff format --check` clean
-- **Types:** `mypy --strict` clean over 80 source files
-- **Database:** migrations `0001`–`0004` applied, downgrade/upgrade
+- **Types:** `mypy --strict` clean over 85 source files
+- **Database:** migrations `0001`–`0005` applied, downgrade/upgrade
   round-trips verified
 - **Repository:** committed and pushed to `main` at
   `github.com/Neo945/AI-Engineer`
@@ -309,14 +309,84 @@ checkpoint; a retry re-runs the same task and appends to the transcript.
 
 ---
 
+## Step 10 — Multi-agent pipeline (Phase 8)
+
+**Spec**
+
+Let a task run a composed multi-agent pipeline — planner → coder → reviewer →
+tester — instead of only the single coder loop. All stages share one task, one
+workspace, and one incrementally persisted transcript; a non-PASS reviewer or
+failing tester routes back to the coder for rework, bounded by a
+`max_passes` limit so the pipeline always terminates. Cooperative cancellation
+and the attempt/retry machinery must keep working unchanged for both agent
+types.
+
+**Deliverables**
+
+- `app/agents/base.py` — `LoopAgent`, a shared single-node ReAct loop (the
+  machinery extracted from the coder): LLM call → tool execution → result
+  feedback, bounded by `max_steps`, with the `on_message`/`should_cancel`
+  hooks. `run(goal, initial_messages)` seeds and streams the goal;
+  `run_from(messages)` runs over an existing conversation without re-emitting
+  it (how a composed pipeline reuses the loop per stage). `LoopResult`,
+  `LoopState`, and structural `RunResult`/`AgentLike` protocols.
+- `app/agents/coder.py` — `CoderAgent` is now a thin `LoopAgent` subclass
+  (same public constructor); `CoderResult` aliases `LoopResult`;
+  `format_tool_result` moved to the base and re-exported.
+- `app/agents/pipeline.py` — `PipelineAgent`, a LangGraph graph over one
+  shared transcript: `planner` produces the plan, `coder` implements it,
+  `reviewer` judges it, `tester` verifies it. Each stage runs a fresh
+  `LoopAgent` via `run_from` over the accumulated messages and returns only
+  the delta. `_route_review`/`_route_test` send non-PASS verdicts back to
+  `coder`, counting rework in `pass_count` bounded by `max_passes`;
+  `parse_verdict` reads the `VERDICT: PASS|CHANGES_NEEDED|FAIL` first line
+  (fail-safe). `PipelineResult` mirrors the loop result plus `passes`.
+- `app/orchestrator/orchestrator.py` — `_build_agent` dispatches on
+  `task.agent_type`: `coder` → `CoderAgent`, `pipeline` → `PipelineAgent`;
+  unknown types fail the task with `ValueError: unsupported agent_type: …`.
+  The executor/agent construction moved inside the run's try block so a
+  failure surfaces as a FAILED task.
+- `app/core/config.py` — `pipeline_max_passes` (default 2) bounds rework.
+- `tests/unit/test_pipeline_agent.py` — verdict parsing, happy path (plan →
+  code → review PASS → test PASS with summed tokens and per-stage transcript
+  growth), reviewer/tester-triggered rework loops, rework bound
+  (`max_passes`), zero-passes, `on_message` streaming, cooperative
+  cancellation.
+- `tests/integration/test_orchestrator.py` — a `pipeline` task persists the
+  full 4-stage transcript with summed token accounting and events; an unknown
+  `agent_type` fails the task with the captured error.
+- `tests/integration/test_tasks_api.py` — `POST …/tasks` with
+  `agent_type: "pipeline"` runs end to end through the API (completed,
+  ​4-stage transcript, `20`/`8` tokens).
+
+**Result**
+
+- 12 new tests; full suite at 150 passing.
+- A `pipeline` task runs planner → coder → reviewer → tester in a single
+  run/attempt; the transcript grows monotonically across stages (each stage's
+  LLM call sees the accumulated conversation) and is persisted exactly once
+  per message through the shared `on_message` hook.
+- Reviewer `CHANGES_NEEDED` and tester `FAIL` verdicts route back to the coder;
+  rework is counted and bounded by `pipeline_max_passes`, after which the
+  pipeline terminates with the latest verdict — guaranteed termination.
+- Cancellation still works: `should_cancel` is checked at every stage's step
+  boundaries and raises `TaskCancelled`; retry/attempt semantics are unchanged
+  (a pipeline task retries as one task).
+- Migration-independent: no schema changes were required; the existing
+  `Task.agent_type` column now has two supported values.
+
+---
+
 ## Final integrated result
 
-With all nine steps in place, an end-to-end request flow is verified:
+With all ten steps in place, an end-to-end request flow is verified:
 
 1. `POST /api/v1/sessions/{id}/tasks` creates a task (status `pending`,
-   `attempt 0`) and runs the LangGraph coder loop against the configured LLM
-   in the background, executing tools in the sandbox and persisting the
-   transcript incrementally.
+   `attempt 0`) and runs it against the configured LLM in the background:
+   `agent_type: "coder"` runs the single LangGraph coder loop, while
+   `agent_type: "pipeline"` runs the planner → coder → reviewer → tester
+   pipeline over the same transcript (rework bounded by `pipeline_max_passes`),
+   executing tools in the sandbox and persisting the transcript incrementally.
 2. `GET /api/v1/sessions/{id}/tasks/{task_id}/events` replays the current
    state and then streams each message and status transition live until the
    task terminates.
@@ -333,6 +403,5 @@ With all nine steps in place, an end-to-end request flow is verified:
 
 ### What is intentionally out of scope (future phases)
 
-- Multi-agent pipeline: planner → coder → reviewer → tester
 - Authentication/authorization and user-facing session management
 - Retrieval (AST indexing + embeddings), memory, evals, monitoring

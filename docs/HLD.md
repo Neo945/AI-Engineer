@@ -1,7 +1,7 @@
 # High-Level Design (HLD) — coding-agent
 
-Version 1.1 · applies to the current implementation (Phases 1–6, streaming
-events over SSE)
+Version 1.2 · applies to the current implementation (Phases 1–8, streaming
+events over SSE, retries/cancellation, multi-agent pipeline)
 
 ---
 
@@ -145,9 +145,10 @@ everything through repositories, never via raw SQL.
   injectable `EventBroker` (and optional callback) — the transport for SSE
   streaming and the seam for Redis pub/sub at scale.
 
-### 6.3 CoderAgent (LangGraph)
+### 6.3 Agents (LangGraph)
 
-- A single-node **self-loop** over a `StateGraph`. Each pass:
+- A shared `LoopAgent` base provides the single-node **self-loop** used by
+  every stage agent. Each pass:
   1. calls the LLM with the accumulated transcript + tool catalog + system prompt;
   2. if tool requests → execute them through `ToolExecutor`, append
      assistant + tool messages, loop;
@@ -157,6 +158,13 @@ everything through repositories, never via raw SQL.
 - An optional `on_message` hook fires for every produced message (goal,
   assistant turns, tool results) in transcript order, which is what lets the
   orchestrator persist and stream live.
+- `CoderAgent` is the default (coder system prompt); the multi-agent
+  **pipeline** composes `planner` → `coder` → `reviewer` → `tester` in one
+  `StateGraph` over a single shared transcript. Each stage runs a fresh
+  `LoopAgent` over the accumulated messages and returns only the delta;
+  `_route_review`/`_route_test` send non-PASS verdicts back to the coder,
+  with rework counted and bounded by `pipeline_max_passes` so the pipeline
+  always terminates.
 
 ### 6.4 LLM layer
 
@@ -186,14 +194,16 @@ everything through repositories, never via raw SQL.
 ## 7. Request lifecycle (task run)
 
 ```
-1. POST /sessions/{id}/tasks {"goal": "…"}
+1. POST /sessions/{id}/tasks {"goal": "…", "agent_type": "coder"|"pipeline"}
 2. Gateway: 404 if session missing → create Task (PENDING) → commit → 202
 3. Background: Orchestrator marks RUNNING + started_at → resolves workspace dir
-4. Build ToolExecutor + CoderAgent (on_message hook wires persistence+events)
-5. Loop (≤ max_steps):
+4. Build ToolExecutor + agent for task.agent_type
+   (coder = single loop; pipeline = planner→coder→reviewer→tester graph);
+   on_message hook wires persistence+events
+5. Agent loop (per stage, ≤ max_steps; pipeline rework bounded by max_passes):
      a. LLM.complete(transcript, tools, system) → LLMResponse
      b. tool_requests? → ToolExecutor.execute(each) → TOOL messages
-     c. no tools → final answer → end
+     c. no tools → final answer → end (pipeline: verdict routes to next stage)
      d. each message → persist + commit (incremental) + publish "message" event
 6. Orchestrator: mark COMPLETED (answer, tokens, finished_at) | FAILED (error)
 7. Events fan out via EventBroker; clients get 202 and open the SSE stream
@@ -260,8 +270,8 @@ spawned on the next call.
 ## 12. Quality attributes
 
 - **Testability**: pure contract layers (tools, llm) + injectable
-  `FakeLLM` + stub executor; integration tests run against real Postgres.
-  98 tests passing; `mypy --strict` and `ruff` clean.
+   `FakeLLM` + stub executor; integration tests run against real Postgres.
+   150 tests passing; `mypy --strict` and `ruff` clean.
 - **Extensibility**: new tools = spec + args model + handler, registered in
   `ToolExecutor._register`; new LLM provider = adapter implementing
   `LLMProvider` + factory branch.
@@ -285,6 +295,11 @@ spawned on the next call.
    `CancellationRegistry` (`should_cancel` hook). Scale-out swap: the
    in-process registry → a shared signal store, same interface.
 3. Multi-agent pipeline: planner → coder → reviewer → tester.
+   **Done (Phase 8)** — `Task.agent_type` may be `pipeline`, running all four
+   stages in one LangGraph graph over a single shared transcript with
+   reviewer/tester rejection routing back to the coder (rework bounded by
+   `pipeline_max_passes`). Stages compose the shared `LoopAgent`; per-stage
+   isolation and subtask trees (`parent_task_id`) remain future work.
 4. Auth + user-facing session/workspace management APIs.
 5. Retrieval (AST + embeddings via pgvector) and memory.
 6. Evals harness and monitoring (OTel).

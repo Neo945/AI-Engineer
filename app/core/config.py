@@ -44,6 +44,9 @@ class Settings(BaseSettings):
         llm_timeout_seconds: Per-request timeout for LLM calls.
         task_max_attempts: Default cap on how many times a task may be run
             (retried) before it is left in its terminal state.
+        pipeline_max_passes: Upper bound on rework round-trips (reviewer→
+            coder, tester→coder) in the multi-agent pipeline before it
+            terminates with the latest verdict.
     """
 
     model_config = SettingsConfigDict(
@@ -81,6 +84,8 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = Field(default=120.0, ge=1.0)
 
     task_max_attempts: int = Field(default=3, ge=1)
+
+    pipeline_max_passes: int = Field(default=2, ge=0)
 
 
 @lru_cache

@@ -11,7 +11,9 @@ from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.agents.base import AgentLike
 from app.agents.coder import CoderAgent
+from app.agents.pipeline import PipelineAgent
 from app.core.config import Settings
 from app.database.models.enums import MessageRole, TaskStatus
 from app.database.models.message import Message
@@ -102,6 +104,41 @@ class Orchestrator:
     def _default_executor(self, workspace_dir: Path) -> ToolExecutor:
         return ToolExecutor.build(workspace_dir=workspace_dir, settings=self._settings)
 
+    def _build_agent(
+        self,
+        task: Task,
+        executor: ToolExecutor,
+        on_message: Callable[[ChatMessage], Awaitable[None] | None],
+    ) -> AgentLike:
+        """Build the agent that runs ``task``, dispatching on its agent type.
+
+        ``coder`` runs the single coder loop; ``pipeline`` runs the composed
+        planner → coder → reviewer → tester pipeline over the same transcript.
+        Unknown types raise a ``ValueError`` that the caller turns into a
+        failed task.
+        """
+        should_cancel = self._cancel_checked(task.id)
+        if task.agent_type == "pipeline":
+            return PipelineAgent(
+                llm=self._llm,
+                executor=executor,
+                max_tokens=self._settings.llm_max_tokens,
+                temperature=self._settings.llm_temperature,
+                on_message=on_message,
+                should_cancel=should_cancel,
+                max_passes=self._settings.pipeline_max_passes,
+            )
+        if task.agent_type == "coder":
+            return CoderAgent(
+                llm=self._llm,
+                executor=executor,
+                max_tokens=self._settings.llm_max_tokens,
+                temperature=self._settings.llm_temperature,
+                on_message=on_message,
+                should_cancel=should_cancel,
+            )
+        raise ValueError(f"unsupported agent_type: {task.agent_type}")
+
     async def run_task(self, task_id: uuid.UUID) -> Task:
         """Run ``task_id`` to completion and return its final state.
 
@@ -133,7 +170,6 @@ class Orchestrator:
             )
 
             workspace_dir = Path(task.session.workspace.repo_path)
-            executor = self._executor_factory(workspace_dir)
             ordinal = await MessageRepository(session).max_ordinal(task.session_id)
 
             async def _append(message: ChatMessage) -> None:
@@ -149,15 +185,9 @@ class Orchestrator:
                     ),
                 )
 
-            agent = CoderAgent(
-                llm=self._llm,
-                executor=executor,
-                max_tokens=self._settings.llm_max_tokens,
-                temperature=self._settings.llm_temperature,
-                on_message=_append,
-                should_cancel=self._cancel_checked(task.id),
-            )
             try:
+                executor = self._executor_factory(workspace_dir)
+                agent = self._build_agent(task, executor, _append)
                 result = await agent.run(task.goal)
             except TaskCancelled:
                 return await self._cancel(session, task)

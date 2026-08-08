@@ -1,7 +1,7 @@
 # Low-Level Design (LLD) — coding-agent
 
-Version 1.1 · applies to the current implementation (Phases 1–6, includes
-streaming events over SSE)
+Version 1.2 · applies to the current implementation (Phases 1–8, streaming
+events over SSE, retries/cancellation, multi-agent pipeline)
 
 Companion to [HLD.md](HLD.md). This document specifies the concrete
 structure: packages, classes with their public interfaces, the database
@@ -35,7 +35,9 @@ app/
 ├── orchestrator/
 │   └── orchestrator.py       #   Orchestrator, OrchestratorEvent
 ├── agents/
-│   └── coder.py              #   CoderAgent, CoderState, CoderResult, format_tool_result
+│   ├── base.py                #   LoopAgent (shared loop), LoopResult, format_tool_result
+│   ├── coder.py               #   CoderAgent (LoopAgent subclass), coder system prompt
+│   └── pipeline.py            #   PipelineAgent (planner→coder→reviewer→tester), parse_verdict
 ├── llm/
 │   ├── messages.py           #   ChatMessage, ChatRole, ToolRequest
 │   ├── protocol.py           #   LLMProvider, LLMResponse, LLMStreamEvent, LLMUsage
@@ -222,35 +224,84 @@ build_llm_client(settings) -> LLMProvider      # "anthropic" | "openai" else Val
   slots keyed by `index`; final chunk yields usage; emits `text`,
   `tool_request`, `usage` events.
 
-### 3.5 Coder agent — `app/agents/coder.py`
+### 3.5 Agents — `app/agents/`
+
+**Shared loop — `base.py`**
 
 ```
-CoderState(TypedDict, total=False)
+LoopState(TypedDict, total=False)
   goal: str | messages: Annotated[list[ChatMessage], add] | step: int
   max_steps: int | continue_loop: bool | final_answer: str
   input_tokens: Annotated[int, add] | output_tokens: Annotated[int, add]
 
-CoderResult(answer, messages, input_tokens, output_tokens, steps)
+LoopResult(answer, messages, input_tokens, output_tokens, steps)
 
-CoderAgent(llm, executor, system_prompt=None, max_steps=8, max_tokens=4096,
-           temperature=0.0, on_message=None)
-  async run(goal, initial_messages=()) -> CoderResult
-  # graph: START → coder(_step) → {continue: coder, end: END} via _route
+RunResult(Protocol)  # answer | messages | input_tokens | output_tokens
+AgentLike(Protocol)  # async run(goal) -> RunResult
+
+LoopAgent(llm, executor, system_prompt, max_steps=8, max_tokens=4096,
+          temperature=0.0, on_message=None, should_cancel=None)
+  async run(goal, initial_messages=()) -> LoopResult
+    # seeds ChatMessage(USER, goal) + initial_messages, streams all of them
+    # through on_message, then delegates to run_from(seeded)
+  async run_from(messages) -> LoopResult
+    # runs the loop over an existing conversation WITHOUT re-emitting it via
+    # on_message — composed pipelines pass each stage the accumulated
+    # transcript and append only the delta
+  # graph: START → step(_step) → {continue: step, end: END} via _route
   async _step(state) -> dict   # LLM call; branches on tool_requests
   async _execute_tool(request) -> ChatMessage   # unknown tool → TOOL msg
   _route(state) -> "continue" | "end"
-  _invoke_on_message(message)   # fires on_message (sync or async) for goal,
-                                # every assistant turn, and every tool result
+  _invoke_on_message(message)   # fires on_message (sync or async) for every
+                                # produced assistant turn and tool result
 format_tool_result(result) -> str   # output; "[error] detail"; "(tool X returned no output)"
 ```
 
-Loop semantics: state reducer `operator.add` **accumulates** `messages` and
-token counts across steps; `final_answer` is the content of the last
-assistant message; `steps` increments per LLM call; `_route` stops when
-`continue_loop` is false or `step >= max_steps`. When `on_message` is set it
-is invoked in transcript order for the seeded goal message, each assistant
-message, and each tool result (including the `unknown tool` response), so a
-caller can persist/stream each entry as it is produced.
+**Coder — `coder.py`**
+
+```
+CoderAgent = LoopAgent subclass; same constructor, defaults to the coder
+system prompt ("…make focused edits, run commands, and commit your work…").
+CoderResult = LoopResult  (alias kept for compatibility)
+```
+
+**Pipeline — `pipeline.py`**
+
+```
+PipelineState(TypedDict, total=False)
+  goal: str
+  messages: Annotated[list[ChatMessage], add]      # one shared transcript
+  step: Annotated[int, add]                        # total LLM calls, all stages
+  max_steps: int                                   # per-stage loop bound
+  pass_count: int | max_passes: int                # rework counter / bound
+  plan: str | feedback: str | final_answer: str
+  input_tokens/output_tokens: Annotated[int, add]
+
+PipelineResult(answer, messages, input_tokens, output_tokens, steps, passes)
+
+parse_verdict(answer) -> bool   # True iff first line contains "PASS"
+
+PipelineAgent(llm, executor, max_passes=2, max_steps=8, max_tokens=4096,
+              temperature=0.0, on_message=None, should_cancel=None)
+  async run(goal) -> PipelineResult   # emits goal via on_message, then graph
+  # graph: START → planner → coder → reviewer →_route_review→
+  #            {coder, tester, end}; tester →_route_test→ {coder, end}
+  # nodes run one stage each; _run_stage spins up a fresh LoopAgent over the
+  #   accumulated messages (run_from) and returns only the delta
+  # reviewer/tester set feedback + final_answer; non-PASS increments pass_count
+  _route_review(state) -> "coder" | "tester" | "end"
+  _route_test(state)   -> "coder" | "end"
+```
+
+Loop semantics: `operator.add` reducers accumulate `messages`, `step`, and
+token counts across stages; each stage's LLM call sees the running
+conversation (transcript grows monotonically). A `PASS` reviewer routes to
+the tester; a `PASS` tester ends. A `CHANGES_NEEDED`/`FAIL` verdict routes
+back to the coder while `pass_count < max_passes`, otherwise the pipeline
+ends with the latest verdict — guaranteed termination. The final answer is
+the last stage's message. `should_cancel` is checked inside every stage's
+steps and raises `TaskCancelled`, so cooperative cancellation spans the whole
+pipeline.
 
 ### 3.6 Orchestrator — `app/orchestrator/orchestrator.py`
 
@@ -273,9 +324,10 @@ Orchestrator(session_factory, llm, settings, on_event=None,
   #   4. executor = executor_factory(workspace_dir) | ToolExecutor.build(...)
   #   5. ordinal_base = max_ordinal(session)   # -1 for an empty session
   #   6. _append(msg): ordinal_base+=1; persist Message(ordinal); commit;
-  #        emit "message" event          ← CoderAgent.on_message hook
-  #   7. agent = CoderAgent(llm, executor, ..., on_message=_append,
-  #        should_cancel=is_requested(task_id))     # cooperative cancel
+  #        emit "message" event          ← agent.on_message hook
+  #   7. agent = _build_agent(task, executor, _append)
+  #        coder → CoderAgent | pipeline → PipelineAgent (max_passes=…)
+  #        unknown agent_type → ValueError (surfaced as task FAILED)
   #   8. try: result = await agent.run(task.goal)
   #        except TaskCancelled → _cancel
   #        except Exception     → _fail
@@ -596,7 +648,7 @@ Applied to every filesystem path and terminal `workdir` before I/O.
 
 ### 5.5 Token accounting
 
-Summed across LLM calls in the coder loop and stored on the task for
+Summed across LLM calls (each coder/stage loop) and stored on the task for
 per-task cost accounting.
 
 ## 6. Configuration reference
@@ -621,6 +673,7 @@ per-task cost accounting.
 | `LLM_TEMPERATURE` | `0` | 0..2 |
 | `LLM_TIMEOUT_SECONDS` | `120` | ≥1 |
 | `TASK_MAX_ATTEMPTS` | `3` | retry budget per task (≥1) |
+| `PIPELINE_MAX_PASSES` | `2` | rework rounds allowed in the multi-agent pipeline (≥0) |
 
 ## 7. API contract
 
@@ -637,7 +690,10 @@ per-task cost accounting.
 
 `TaskResponse`: `id, session_id, parent_task_id, agent_type, status, goal,
 result, error, attempt, max_attempts, input_tokens, output_tokens,
-started_at, finished_at, created_at, updated_at`.
+started_at, finished_at, created_at, updated_at`. Supported `agent_type`
+values are `coder` (default, single loop) and `pipeline` (multi-agent
+pipeline); an unknown type fails the task with a captured
+`ValueError: unsupported agent_type: …`.
 
 `TaskDetailResponse` = TaskResponse + `messages: [{id, session_id, task_id,
 role, content, ordinal, tool_call_id, tool_calls, token_count, created_at}]`
@@ -653,7 +709,8 @@ ordered by ordinal.
 | Sandbox | Timeout → kill + container destroyed + `timed_out=True`; DockerError → `ok=False` sandbox error |
 | Executor | Per-tool errors returned as results; terminal/git timeout → `ok=False` with message |
 | CoderAgent | Unknown tool name → TOOL message `"unknown tool: …"`; loop always terminates; `should_cancel` → raises `TaskCancelled` |
-| Orchestrator | Agent exceptions → `task.status=FAILED` + `error`; **not re-raised**; missing task → `ValueError`; running/terminal task → guarded (terminal = noop, running = `ValueError`); `retry_task` → `ValueError` on non-terminal/max-attempts |
+| PipelineAgent | Stage loops inherit the coder loop's guarantees; non-PASS verdicts route to coder while `pass_count < max_passes`, else pipeline ends (always terminates) |
+| Orchestrator | Agent/exceptions → `task.status=FAILED` + `error`; **not re-raised**; missing task → `ValueError`; running/terminal task → guarded (terminal = noop, running = `ValueError`); `retry_task` → `ValueError` on non-terminal/max-attempts; unknown `agent_type` → `ValueError` |
 | CancellationRegistry | No-ops on unknown/terminal tasks (`reset`/`discard` idempotent); `is_requested` reads without raising |
 | EventBroker | Best-effort publish: `QueueFull`/slow subscriber dropped, never raises |
 | Gateway | 404 session/task, 409 retry/cancel conflicts, 422 validation, 503 LLM unconfigured (dependency), 202/200 otherwise; SSE closes on disconnect via `finally` unsubscribe |
@@ -662,14 +719,16 @@ ordered by ordinal.
 
 - **Unit** (no infra): config, model round-trips, path confinement, filesystem
   tool logic, registry validation, LLM message/adapters/factory (with stub
-  SDKs), coder agent (FakeLLM + stub executor, incl. `on_message` hook),
-  event broker pub/sub. `make test-unit`.
+  SDKs), coder agent and pipeline agent (FakeLLM + stub executor, incl.
+  `on_message` hooks, verdict parsing, and rework routing/bounds), event
+  broker pub/sub. `make test-unit`.
 - **Sandbox**: real Docker execution (requires `make executor-image`).
 - **Integration** (requires `make up`): repositories, health/readiness,
   orchestrator against real Postgres + FakeLLM + stub executor (incl.
-  broker-published message events and partial transcripts on failure),
-  tasks API via ASGI client with `app.dependency_overrides[get_orchestrator]`
-  (async `202` create + SSE replay/live streams).
+  broker-published message events, partial transcripts on failure, pipeline
+  runs, and unsupported-`agent_type` failures), tasks API via ASGI client
+  with `app.dependency_overrides[get_orchestrator]` (async `202` create +
+  SSE replay/live streams).
 - Tooling: `make lint` (ruff), `make typecheck` (mypy strict, pydantic +
   sqlalchemy plugins), `make test`.
 
@@ -686,8 +745,10 @@ fixtures, autouse table truncation.
 - **Streaming to clients**: the broker already fans out `message` events;
   swap `EventBroker` for Redis pub/sub (same interface) if the gateway and
   orchestrator are split, or add per-LLM-call token/text events.
-- **Planner/reviewer/tester**: add LangGraph nodes/states composing
-  `CoderAgent`-style loops; `Task.parent_task_id` already models the tree.
+- **Per-stage isolation / subtask trees**: stages already compose the shared
+  `LoopAgent`; to isolate contexts or parallelize work, spawn real child
+  `Task` rows (`Task.parent_task_id` already models the tree) and schedule
+  them from the pipeline, mirroring `run_task`.
 - **Automatic retries**: wire a bounded retry loop over `Orchestrator.run_task`
   for transient (retryable) failures — deferred because a terminal FAILED
   closes the SSE stream; add a retryable-error taxonomy + backoff when

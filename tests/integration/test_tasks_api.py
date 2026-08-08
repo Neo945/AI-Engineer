@@ -236,6 +236,55 @@ async def test_create_and_run_task_persists_tool_roundtrip(
     assert messages[3]["content"] == "Done."
 
 
+async def test_create_and_run_pipeline_task(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    use_fake_llm: Callable[[LLMProvider], None],
+) -> None:
+    session_id = await _seed_session(db_session)
+    use_fake_llm(
+        FakeLLM(
+            [
+                _final_response("Plan: 1. Inspect. 2. Fix."),
+                _final_response("Fixed the bug."),
+                _final_response("VERDICT: PASS\nLooks good."),
+                _final_response("VERDICT: PASS\nTests green."),
+            ]
+        )
+    )
+
+    response = await client.post(
+        f"/api/v1/sessions/{session_id}/tasks",
+        json={"goal": "Fix the bug", "agent_type": "pipeline"},
+    )
+    assert response.status_code == 202
+    assert response.json()["agent_type"] == "pipeline"
+    task_id = response.json()["id"]
+
+    detail = await client.get(f"/api/v1/tasks/{task_id}")
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["status"] == "completed"
+    assert body["result"] == "VERDICT: PASS\nTests green."
+    assert body["input_tokens"] == 20
+    assert body["output_tokens"] == 8
+    assert [m["role"] for m in body["messages"]] == [
+        "user",
+        "assistant",
+        "assistant",
+        "assistant",
+        "assistant",
+    ]
+    assert [m["content"] for m in body["messages"]] == [
+        "Fix the bug",
+        "Plan: 1. Inspect. 2. Fix.",
+        "Fixed the bug.",
+        "VERDICT: PASS\nLooks good.",
+        "VERDICT: PASS\nTests green.",
+    ]
+    assert [m["ordinal"] for m in body["messages"]] == [0, 1, 2, 3, 4]
+
+
 async def test_create_task_returns_503_when_llm_unconfigured(
     client: AsyncClient,
     db_session: AsyncSession,
