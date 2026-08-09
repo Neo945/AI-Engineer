@@ -43,7 +43,11 @@ class RunResult(Protocol):
 class AgentLike(Protocol):
     """Structural type of an agent the orchestrator can run for a goal."""
 
-    async def run(self, goal: str) -> RunResult: ...
+    async def run(
+        self,
+        goal: str,
+        initial_messages: Sequence[ChatMessage] = (),
+    ) -> RunResult: ...
 
 
 class LoopState(TypedDict, total=False):

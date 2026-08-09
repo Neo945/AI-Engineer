@@ -21,10 +21,11 @@ from app.database.models.task import Task
 from app.database.repositories.message import MessageRepository
 from app.database.repositories.task import TaskRepository
 from app.executor.executor import ToolExecutor
-from app.llm.messages import ChatMessage, ToolRequest
+from app.llm.messages import ChatMessage, ChatRole, ToolRequest
 from app.llm.protocol import LLMProvider
 from app.orchestrator.broker import EventBroker
 from app.orchestrator.cancellation import CancellationRegistry, TaskCancelled
+from app.retrieval.context import ContextAssembler, format_context
 
 EventKind = Literal["started", "message", "completed", "failed", "cancelled"]
 
@@ -188,7 +189,11 @@ class Orchestrator:
             try:
                 executor = self._executor_factory(workspace_dir)
                 agent = self._build_agent(task, executor, _append)
-                result = await agent.run(task.goal)
+                initial_messages = await self._assemble_context(session, task)
+                result = await agent.run(
+                    task.goal,
+                    initial_messages=initial_messages,
+                )
             except TaskCancelled:
                 return await self._cancel(session, task)
             except Exception as exc:
@@ -214,6 +219,28 @@ class Orchestrator:
             )
             await self._discard_cancel(task.id)
             return task
+
+    async def _assemble_context(
+        self,
+        session: AsyncSession,
+        task: Task,
+    ) -> Sequence[ChatMessage]:
+        """Retrieve a bounded context window for the task's goal.
+
+        Returns an empty sequence when retrieval is disabled or the workspace
+        has no matching chunks, so the agent loop runs exactly as before.
+        """
+        if not self._settings.retrieval_enabled:
+            return ()
+        window = await ContextAssembler.from_session(
+            session,
+            max_chunks=self._settings.retrieval_max_chunks,
+            max_chars=self._settings.retrieval_max_chars,
+        ).assemble(task.session.workspace.id, task.goal)
+        text = format_context(window)
+        if not text:
+            return ()
+        return [ChatMessage(role=ChatRole.USER, content=text)]
 
     async def retry_task(self, task_id: uuid.UUID) -> Task:
         """Reset a terminal task so it can be run again.

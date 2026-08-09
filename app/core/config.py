@@ -47,6 +47,11 @@ class Settings(BaseSettings):
         pipeline_max_passes: Upper bound on rework round-trips (reviewer→
             coder, tester→coder) in the multi-agent pipeline before it
             terminates with the latest verdict.
+        retrieval_enabled: Feed an assembled context window into the agent
+            loop at the start of each run.
+        retrieval_max_chunks: Cap on chunks in a retrieved context window.
+        retrieval_max_chars: Cap on total context content characters; the
+            assembler keeps the highest-ranked chunks that fit the budget.
     """
 
     model_config = SettingsConfigDict(
@@ -86,6 +91,10 @@ class Settings(BaseSettings):
     task_max_attempts: int = Field(default=3, ge=1)
 
     pipeline_max_passes: int = Field(default=2, ge=0)
+
+    retrieval_enabled: bool = True
+    retrieval_max_chunks: int = Field(default=20, ge=1)
+    retrieval_max_chars: int = Field(default=12_000, ge=256)
 
 
 @lru_cache

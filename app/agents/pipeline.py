@@ -17,7 +17,7 @@ answer), which carries the verdict and feedback.
 from __future__ import annotations
 
 import operator
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, TypedDict
 
@@ -189,17 +189,25 @@ class PipelineAgent:
         )
         return builder.compile()
 
-    async def run(self, goal: str) -> PipelineResult:
+    async def run(
+        self,
+        goal: str,
+        initial_messages: Sequence[ChatMessage] = (),
+    ) -> PipelineResult:
         """Execute the full pipeline for a goal and return the final result.
 
-        The goal is seeded as the leading user message and streamed through
-        ``on_message`` before the graph runs, matching the coder agent.
+        The goal is seeded as the leading user message (streamed through
+        ``on_message`` before the graph runs); any ``initial_messages`` are
+        appended after it, matching the coder agent. Every stage then reads
+        the full seeded conversation via ``run_from``.
         """
         goal_message = ChatMessage(role=ChatRole.USER, content=goal)
         await self._invoke_on_message(goal_message)
+        for message in initial_messages:
+            await self._invoke_on_message(message)
         initial: PipelineState = {
             "goal": goal,
-            "messages": [goal_message],
+            "messages": [goal_message, *initial_messages],
             "step": 0,
             "max_steps": self._max_steps,
             "pass_count": 0,

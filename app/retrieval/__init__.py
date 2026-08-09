@@ -11,20 +11,29 @@ column later.
 from __future__ import annotations
 
 from app.retrieval.chunking import Chunk, chunk_source
+from app.retrieval.context import ContextAssembler, ContextItem, ContextWindow, format_context
 from app.retrieval.discovery import discover_source_files, is_excluded
 from app.retrieval.indexer import IndexSummary, RepositoryIndexer
 from app.retrieval.languages import Language, detect_language
+from app.retrieval.retriever import Retriever, ScoredChunk, extract_query_terms
 from app.retrieval.symbols import Symbol, extract_symbols
 
 __all__ = [
     "Chunk",
+    "ContextAssembler",
+    "ContextItem",
+    "ContextWindow",
     "IndexSummary",
     "Language",
     "RepositoryIndexer",
+    "Retriever",
+    "ScoredChunk",
     "Symbol",
     "chunk_source",
     "detect_language",
     "discover_source_files",
+    "extract_query_terms",
     "extract_symbols",
+    "format_context",
     "is_excluded",
 ]
