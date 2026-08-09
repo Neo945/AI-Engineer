@@ -37,6 +37,7 @@ from app.database.repositories.workspace import WorkspaceRepository
 from app.executor.git import GitOutput, run_git
 from app.llm.messages import ChatMessage, ChatRole
 from app.orchestrator.orchestrator import Orchestrator, OrchestratorEvent
+from app.retrieval.indexer import RepositoryIndexer
 
 _TERMINAL_STATUSES = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED})
 _TERMINAL_EVENT_KINDS = frozenset({"completed", "failed", "cancelled"})
@@ -138,6 +139,38 @@ async def cmd_status(ctx: CliContext, *, repo: Path, state: WorkspaceState) -> i
     for key, value in lines:
         grid.add_row(f"[bold]{key}[/]", value)
     ctx.console.print(Panel(grid, title="engineer status", border_style="cyan"))
+    return 0
+
+
+async def cmd_index(
+    ctx: CliContext,
+    *,
+    repo: Path,
+    state: WorkspaceState,
+    show_progress: bool = True,
+) -> int:
+    """Index the bound workspace's source files into ``code_chunks``.
+
+    Re-indexing is idempotent: the workspace's prior index is replaced in
+    the same transaction, so running ``engineer index`` repeatedly converges.
+    """
+    async with ctx.db_session() as session:
+        summary = await RepositoryIndexer(session).index(
+            workspace_id=state.workspace_id,
+            repo_path=repo,
+        )
+    lines = [
+        ("Repository", repo.name),
+        ("Files indexed", str(summary.files_indexed)),
+        ("Files skipped", str(summary.files_skipped)),
+        ("Chunks created", str(summary.chunks_created)),
+        ("Symbols indexed", str(summary.symbols_indexed)),
+    ]
+    if show_progress:
+        grid = Table.grid(padding=(0, 2))
+        for key, value in lines:
+            grid.add_row(f"[bold]{key}[/]", value)
+        ctx.console.print(Panel(grid, title="engineer index", border_style="cyan"))
     return 0
 
 

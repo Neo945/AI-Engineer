@@ -28,6 +28,7 @@ from app.cli.context import (
 _EPILOG = """\
 examples:
   engineer init                    bind this git checkout to a workspace
+  engineer index                   index the workspace's source files
   engineer run fix the failing test
   engineer run --agent-type pipeline refactor the auth service
   engineer tasks --limit 20
@@ -53,6 +54,9 @@ def build_parser() -> ArgumentParser:
 
     status = subparsers.add_parser("status", help="show the bound workspace and recent activity")
     status.set_defaults(handler=_cmd_status)
+
+    index = subparsers.add_parser("index", help="index the workspace's source files")
+    index.set_defaults(handler=_cmd_index)
 
     run = subparsers.add_parser("run", help="run a goal through the orchestrator")
     run.add_argument(
@@ -107,6 +111,13 @@ async def _cmd_status(
 ) -> int:
     assert state is not None
     return await commands.cmd_status(ctx, repo=repo, state=state)
+
+
+async def _cmd_index(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    assert state is not None
+    return await commands.cmd_index(ctx, repo=repo, state=state)
 
 
 async def _cmd_run(
