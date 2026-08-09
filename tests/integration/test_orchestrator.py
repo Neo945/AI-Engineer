@@ -618,3 +618,195 @@ async def test_run_task_fails_unsupported_agent_type(
     assert done.error == "ValueError: unsupported agent_type: debugger"
     assert done.attempt == 1
     assert done.finished_at is not None
+
+
+def _read_only_plan_text() -> str:
+    return """Objective: Read the README.
+## Files
+- (none)
+## Steps
+1. Open README.md.
+"""
+
+
+def _write_plan_text() -> str:
+    return """Objective: Add a reset password flow.
+## Files
+- src/auth/reset.py
+## Steps
+1. Add the reset token model.
+2. Wire the reset route.
+"""
+
+
+async def test_plan_task_stores_plan_and_returns_to_pending(
+    container: Container,
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    task = await _seed_task(db_session, workspace_dir=str(tmp_path))
+    fake = FakeLLM([_final_response(_write_plan_text())])
+    events: list[OrchestratorEvent] = []
+    orchestrator = await _build_orchestrator(container, llm=fake, events=events)
+
+    await orchestrator.plan_task(task.id)
+
+    async with container.session_factory() as fresh:
+        done = await TaskRepository(fresh).get(task.id)
+        persisted = await MessageRepository(fresh).list_by_task(task.id)
+    assert done is not None
+    assert done.status == TaskStatus.PENDING
+    assert done.plan is not None
+    assert done.plan["objective"] == "Add a reset password flow."
+    assert done.plan["files"] == ["src/auth/reset.py"]
+    assert done.plan_needs_approval is True
+    assert done.plan_approved is None
+    assert [message.role for message in persisted] == [
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+    ]
+    assert persisted[0].content == "Fix the bug"
+    assert persisted[1].content == _write_plan_text()
+    assert [event.kind for event in events] == ["message", "message", "planned"]
+    assert events[-1].kind == "planned"
+    assert events[-1].detail is not None
+    assert "src/auth/reset.py" in events[-1].detail
+
+
+async def test_plan_task_read_only_plan_does_not_require_approval(
+    container: Container,
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    task = await _seed_task(db_session, workspace_dir=str(tmp_path))
+    orchestrator = await _build_orchestrator(
+        container,
+        llm=FakeLLM([_final_response(_read_only_plan_text())]),
+        events=[],
+    )
+
+    await orchestrator.plan_task(task.id)
+
+    async with container.session_factory() as fresh:
+        done = await TaskRepository(fresh).get(task.id)
+    assert done is not None
+    assert done.plan is not None
+    assert done.plan_needs_approval is False
+    assert done.plan_approved is None
+
+
+async def test_run_task_blocked_until_plan_approved(
+    container: Container,
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    task = await _seed_task(db_session, workspace_dir=str(tmp_path))
+    plan_text = _write_plan_text()
+    fake = FakeLLM(
+        [
+            _final_response(plan_text),
+            _final_response("Fixed."),
+        ]
+    )
+    orchestrator = await _build_orchestrator(container, llm=fake, events=[])
+
+    await orchestrator.plan_task(task.id)
+    with pytest.raises(ValueError, match="awaits approval"):
+        await orchestrator.run_task(task.id)
+
+    approved = await orchestrator.approve_task(task.id)
+    assert approved.plan_approved is True
+    await orchestrator.run_task(task.id)
+
+    async with container.session_factory() as fresh:
+        done = await TaskRepository(fresh).get(task.id)
+        persisted = await MessageRepository(fresh).list_by_task(task.id)
+    assert done is not None
+    assert done.status == TaskStatus.COMPLETED
+    assert done.result == "Fixed."
+    assert done.plan_approved is True
+    plan_seeds = [
+        message.content
+        for message in persisted
+        if message.content.startswith("Follow this approved plan:")
+    ]
+    assert len(plan_seeds) == 1
+    assert "Objective:" in plan_seeds[0]
+    assert "src/auth/reset.py" in plan_seeds[0]
+    assert "Wire the reset route." in plan_seeds[0]
+
+
+async def test_run_task_rejects_rejected_plan(
+    container: Container,
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    task = await _seed_task(db_session, workspace_dir=str(tmp_path))
+    orchestrator = await _build_orchestrator(
+        container,
+        llm=FakeLLM([_final_response(_write_plan_text())]),
+        events=[],
+    )
+
+    await orchestrator.plan_task(task.id)
+    rejected = await orchestrator.reject_task(task.id)
+    assert rejected.plan_approved is False
+
+    with pytest.raises(ValueError, match="was rejected"):
+        await orchestrator.run_task(task.id)
+
+
+async def test_approve_task_requires_pending_plan(
+    container: Container,
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    task = await _seed_task(db_session, workspace_dir=str(tmp_path))
+    orchestrator = await _build_orchestrator(container, llm=FakeLLM(), events=[])
+
+    with pytest.raises(ValueError, match="no plan awaiting approval"):
+        await orchestrator.approve_task(task.id)
+    with pytest.raises(ValueError, match="no plan awaiting approval"):
+        await orchestrator.reject_task(task.id)
+
+
+async def test_plan_task_resets_previous_approval(
+    container: Container,
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    task = await _seed_task(db_session, workspace_dir=str(tmp_path))
+    fake = FakeLLM([_final_response(_write_plan_text()), _final_response(_write_plan_text())])
+    orchestrator = await _build_orchestrator(container, llm=fake, events=[])
+
+    await orchestrator.plan_task(task.id)
+    await orchestrator.approve_task(task.id)
+    await orchestrator.plan_task(task.id)
+
+    async with container.session_factory() as fresh:
+        done = await TaskRepository(fresh).get(task.id)
+    assert done is not None
+    assert done.plan_needs_approval is True
+    assert done.plan_approved is None
+
+
+async def test_approve_reject_emit_events(
+    container: Container,
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    task = await _seed_task(db_session, workspace_dir=str(tmp_path))
+    events: list[OrchestratorEvent] = []
+    orchestrator = await _build_orchestrator(
+        container,
+        llm=FakeLLM([_final_response(_write_plan_text())]),
+        events=events,
+    )
+
+    await orchestrator.plan_task(task.id)
+    await orchestrator.approve_task(task.id)
+    await orchestrator.reject_task(task.id)
+
+    assert [
+        event.kind for event in events if event.kind in ("planned", "approved", "rejected")
+    ] == ["planned", "approved", "rejected"]

@@ -42,6 +42,25 @@ _DESTRUCTIVE_TOKENS = (
     "git clean -f",
 )
 
+#: Placeholder items the model may emit for an empty list section ("(none)",
+#: "no files to change", ...). They parse as content but carry no meaning, so
+#: they are dropped rather than treated as real entries (e.g. a read-only
+#: plan must not be flagged for approval just because it says "(none)").
+_EMPTY_PLACEHOLDERS = frozenset(
+    {
+        "(none)",
+        "none",
+        "n/a",
+        "na",
+        "no files",
+        "no files to change",
+        "no changes",
+        "no dependencies",
+        "no risks",
+        "none at this time",
+    }
+)
+
 
 class TaskPlan:
     """A structured plan artifact produced by the planner stage.
@@ -181,12 +200,12 @@ def parse_plan(text: str) -> TaskPlan:
     objective = "\n".join(objective_lines) if objective_lines else text.strip()
     return TaskPlan(
         objective=objective,
-        assumptions=_field("assumptions"),
-        files=_field("files"),
-        dependencies=_field("dependencies"),
-        risks=_field("risks"),
-        validation=_field("validation"),
-        steps=_field("steps"),
+        assumptions=_clean_items(_field("assumptions")),
+        files=_clean_items(_field("files")),
+        dependencies=_clean_items(_field("dependencies")),
+        risks=_clean_items(_field("risks")),
+        validation=_clean_items(_field("validation")),
+        steps=_clean_items(_field("steps")),
     )
 
 
@@ -243,6 +262,11 @@ def _looks_like_heading(line: str) -> bool:
 def _looks_like_key(text: str) -> bool:
     """Reject prose lines (``Note: ...``) as headings."""
     return bool(re.fullmatch(r"[A-Za-z][A-Za-z _-]*", text))
+
+
+def _clean_items(items: list[str]) -> list[str]:
+    """Drop empty-section placeholder items from a parsed list field."""
+    return [item for item in items if item.strip().lower() not in _EMPTY_PLACEHOLDERS]
 
 
 def _string_list(value: object) -> list[str]:

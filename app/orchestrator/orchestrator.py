@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agents.base import AgentLike
 from app.agents.coder import CoderAgent
 from app.agents.pipeline import PipelineAgent
+from app.agents.planner import PlannerAgent
+from app.agents.planning import TaskPlan, format_plan
 from app.core.config import Settings
 from app.database.models.enums import MessageRole, TaskStatus
 from app.database.models.message import Message
@@ -27,7 +29,16 @@ from app.orchestrator.broker import EventBroker
 from app.orchestrator.cancellation import CancellationRegistry, TaskCancelled
 from app.retrieval.context import ContextAssembler, format_context
 
-EventKind = Literal["started", "message", "completed", "failed", "cancelled"]
+EventKind = Literal[
+    "started",
+    "planned",
+    "message",
+    "approved",
+    "rejected",
+    "completed",
+    "failed",
+    "cancelled",
+]
 
 TaskEventHandler = Callable[["OrchestratorEvent"], Awaitable[None] | None]
 ExecutorFactory = Callable[[Path], ToolExecutor]
@@ -41,12 +52,13 @@ class OrchestratorEvent:
 
     Attributes:
         task_id: The task this event belongs to.
-        kind: ``started``, ``message`` (a transcript entry was persisted),
-            ``completed``, ``failed``, or ``cancelled``.
+        kind: ``started``, ``planned``, ``message`` (a transcript entry was
+            persisted), ``approved``, ``rejected``, ``completed``, ``failed``,
+            or ``cancelled``.
         message: The assistant message on ``completed`` events, or the
             persisted transcript entry on ``message`` events.
-        detail: The goal (``started``), final answer (``completed``), or
-            formatted error (``failed``).
+        detail: The goal (``started``), formatted plan (``planned``), final
+            answer (``completed``), or formatted error (``failed``).
         ordinal: Transcript ordinal of ``message`` on ``message`` events.
     """
 
@@ -146,10 +158,12 @@ class Orchestrator:
         Each invocation is one *attempt*: the task is locked, its status is
         guarded (terminal tasks return unchanged; running tasks raise), and
         ``attempt`` is incremented and persisted with the RUNNING transition.
-        Status plus the incrementally persisted transcript form a durable
-        checkpoint: a failed run can be retried and a crashed run is never
-        silently lost. Cancellation is cooperative via the optional
-        ``cancellations`` registry, checked between steps.
+        A task whose plan requires human approval cannot run until the plan is
+        approved, and a rejected plan cannot run at all. Status plus the
+        incrementally persisted transcript form a durable checkpoint: a failed
+        run can be retried and a crashed run is never silently lost.
+        Cancellation is cooperative via the optional ``cancellations``
+        registry, checked between steps.
         """
         async with self._session_factory() as session:
             task = await TaskRepository(session).get_for_run(task_id, for_update=True)
@@ -160,6 +174,10 @@ class Orchestrator:
                 return task
             if task.status == TaskStatus.RUNNING:
                 raise ValueError(f"task already running: {task_id}")
+            if task.plan_needs_approval and task.plan_approved is None:
+                raise ValueError("task plan awaits approval before it can run")
+            if task.plan_approved is False:
+                raise ValueError("task plan was rejected")
 
             task.status = TaskStatus.RUNNING
             task.attempt += 1
@@ -171,25 +189,12 @@ class Orchestrator:
             )
 
             workspace_dir = Path(task.session.workspace.repo_path)
-            ordinal = await MessageRepository(session).max_ordinal(task.session_id)
-
-            async def _append(message: ChatMessage) -> None:
-                nonlocal ordinal
-                ordinal += 1
-                await self._persist_message(session, task, message, ordinal)
-                await self._emit(
-                    OrchestratorEvent(
-                        task_id=task.id,
-                        kind="message",
-                        message=message,
-                        ordinal=ordinal,
-                    ),
-                )
+            append = await self._transcript_appender(session, task)
 
             try:
                 executor = self._executor_factory(workspace_dir)
-                agent = self._build_agent(task, executor, _append)
-                initial_messages = await self._assemble_context(session, task)
+                agent = self._build_agent(task, executor, append)
+                initial_messages = await self._assemble_initial_messages(session, task)
                 result = await agent.run(
                     task.goal,
                     initial_messages=initial_messages,
@@ -220,6 +225,129 @@ class Orchestrator:
             await self._discard_cancel(task.id)
             return task
 
+    async def plan_task(self, task_id: uuid.UUID) -> Task:
+        """Run the planner over ``task_id`` and persist the plan artifact.
+
+        The task is locked and flipped to ``planning`` while the planner runs;
+        afterwards it returns to ``pending`` with ``plan`` set,
+        ``plan_needs_approval`` reflecting whether the plan writes files or
+        uses destructive operations, and ``plan_approved`` reset to ``None``
+        so the execution gate (:meth:`run_task`) blocks until the plan is
+        approved or rejected. The planner's transcript is appended to the
+        session and a ``planned`` event carries the formatted plan.
+        """
+        async with self._session_factory() as session:
+            task = await TaskRepository(session).get_for_run(task_id, for_update=True)
+            if task is None:
+                raise ValueError(f"no such task: {task_id}")
+            if task.status in _TERMINAL_STATUSES:
+                await self._discard_cancel(task.id)
+                return task
+            if task.status == TaskStatus.RUNNING:
+                raise ValueError(f"task already running: {task_id}")
+
+            task.status = TaskStatus.PLANNING
+            await session.commit()
+
+            workspace_dir = Path(task.session.workspace.repo_path)
+            append = await self._transcript_appender(session, task)
+
+            try:
+                executor = self._executor_factory(workspace_dir)
+                planner = PlannerAgent(
+                    llm=self._llm,
+                    executor=executor,
+                    max_tokens=self._settings.llm_max_tokens,
+                    temperature=self._settings.llm_temperature,
+                    on_message=append,
+                    should_cancel=self._cancel_checked(task.id),
+                )
+                initial_messages = await self._assemble_context(session, task)
+                result = await planner.plan(
+                    task.goal,
+                    initial_messages=initial_messages,
+                )
+            except TaskCancelled:
+                raise
+            except Exception as exc:
+                task.status = TaskStatus.PENDING
+                await session.commit()
+                raise ValueError(f"planning failed: {exc}") from exc
+
+            task.status = TaskStatus.PENDING
+            await TaskRepository(session).set_plan(
+                task,
+                plan=result.plan.to_dict(),
+                needs_approval=result.plan.needs_approval,
+            )
+            await self._emit(
+                OrchestratorEvent(
+                    task_id=task.id,
+                    kind="planned",
+                    detail=format_plan(result.plan),
+                ),
+            )
+            await self._discard_cancel(task.id)
+            return task
+
+    async def approve_task(self, task_id: uuid.UUID) -> Task:
+        """Record human sign-off on a task's plan so it may run."""
+        async with self._session_factory() as session:
+            task = await self._approvable_task(session, task_id)
+            await TaskRepository(session).set_approval(task, approved=True)
+        await self._emit(OrchestratorEvent(task_id=task_id, kind="approved"))
+        return task
+
+    async def reject_task(self, task_id: uuid.UUID) -> Task:
+        """Record human rejection of a task's plan, blocking execution."""
+        async with self._session_factory() as session:
+            task = await self._approvable_task(session, task_id)
+            await TaskRepository(session).set_approval(task, approved=False)
+        await self._emit(OrchestratorEvent(task_id=task_id, kind="rejected"))
+        return task
+
+    async def _approvable_task(
+        self,
+        session: AsyncSession,
+        task_id: uuid.UUID,
+    ) -> Task:
+        """Fetch a task whose plan is awaiting a human decision."""
+        task = await TaskRepository(session).get_for_run(task_id, for_update=True)
+        if task is None:
+            raise ValueError(f"no such task: {task_id}")
+        if task.status in _TERMINAL_STATUSES:
+            raise ValueError(f"task already finished: {task.status.value}")
+        if task.plan is None or not task.plan_needs_approval:
+            raise ValueError("task has no plan awaiting approval")
+        return task
+
+    async def _transcript_appender(
+        self,
+        session: AsyncSession,
+        task: Task,
+    ) -> Callable[[ChatMessage], Awaitable[None]]:
+        """Return an async callback that persists and announces messages.
+
+        Ordinals continue from the session's transcript so concurrent stages
+        and retries keep a single sequential numbering.
+        """
+        ordinal = await MessageRepository(session).max_ordinal(task.session_id)
+
+        async def _append(message: ChatMessage) -> None:
+            nonlocal ordinal
+            ordinal += 1
+            await self._persist_message(session, task, message, ordinal)
+            await self._emit(
+                OrchestratorEvent(
+                    task_id=task.id,
+                    kind="message",
+                    message=message,
+                    ordinal=ordinal,
+                ),
+            )
+
+        return _append
+
     async def _assemble_context(
         self,
         session: AsyncSession,
@@ -241,6 +369,28 @@ class Orchestrator:
         if not text:
             return ()
         return [ChatMessage(role=ChatRole.USER, content=text)]
+
+    async def _assemble_initial_messages(
+        self,
+        session: AsyncSession,
+        task: Task,
+    ) -> Sequence[ChatMessage]:
+        """Seed an execution run with retrieval context and the approved plan.
+
+        The retrieval window comes first, then the task's plan rendered as a
+        directive, so the executor agent works from both the code context and
+        the human-approved plan.
+        """
+        messages = list(await self._assemble_context(session, task))
+        if task.plan is not None:
+            plan = TaskPlan.from_dict(task.plan)
+            messages.append(
+                ChatMessage(
+                    role=ChatRole.USER,
+                    content=f"Follow this approved plan:\n{format_plan(plan)}",
+                )
+            )
+        return messages
 
     async def retry_task(self, task_id: uuid.UUID) -> Task:
         """Reset a terminal task so it can be run again.

@@ -67,7 +67,7 @@ def test_parse_plan_markdown_headings() -> None:
         "Emails are sent by the existing mailer.",
     ]
     assert plan.files == ["src/auth/reset.py", "src/auth/__init__.py"]
-    assert plan.dependencies == ["None"]
+    assert plan.dependencies == []
     assert plan.risks == ["Token expiry races; mitigate by short TTL and idempotent reset."]
     assert plan.validation == ["Run the unit tests."]
     assert plan.steps == ["Add the reset token model.", "Wire the reset route.", "Run the tests."]
@@ -165,6 +165,24 @@ def test_needs_approval(
         steps=steps,
     )
     assert plan.needs_approval is expected
+
+
+def test_parse_plan_drops_placeholder_items() -> None:
+    text = """## Objective
+Read the README.
+## Files
+- (none)
+## Dependencies
+- None
+## Steps
+- (none)
+"""
+    plan = parse_plan(text)
+
+    assert plan.files == []
+    assert plan.dependencies == []
+    assert plan.steps == []
+    assert plan.needs_approval is False
 
 
 def test_format_plan_roundtrip() -> None:
