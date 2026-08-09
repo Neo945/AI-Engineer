@@ -52,6 +52,13 @@ class Settings(BaseSettings):
         retrieval_max_chunks: Cap on chunks in a retrieved context window.
         retrieval_max_chars: Cap on total context content characters; the
             assembler keeps the highest-ranked chunks that fit the budget.
+        command_policy_enabled: Classify sandboxed terminal commands against
+            deny/confirm rules (destructive commands are blocked or require
+            ``confirm=True``).
+        command_deny_extra: Extra regex patterns, appended to the built-in
+            deny list (commands blocked outright).
+        command_confirm_extra: Extra regex patterns, appended to the built-in
+            confirm list (commands that require ``confirm=True``).
     """
 
     model_config = SettingsConfigDict(
@@ -95,6 +102,10 @@ class Settings(BaseSettings):
     retrieval_enabled: bool = True
     retrieval_max_chunks: int = Field(default=20, ge=1)
     retrieval_max_chars: int = Field(default=12_000, ge=256)
+
+    command_policy_enabled: bool = True
+    command_deny_extra: list[str] = Field(default_factory=list)
+    command_confirm_extra: list[str] = Field(default_factory=list)
 
 
 @lru_cache

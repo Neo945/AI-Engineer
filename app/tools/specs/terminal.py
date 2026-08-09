@@ -19,11 +19,14 @@ class TerminalRunArgs(BaseModel):
 
     ``command`` is a shell script string, executed with ``sh -c``. The
     sandbox enforces a hard wall-clock timeout regardless of this value.
+    ``confirm`` acknowledges a destructive command flagged by the safety
+    policy; leave it false unless the intent really is destructive.
     """
 
     command: str = Field(min_length=1, max_length=MAX_COMMAND_LENGTH)
     workdir: str = "."
     timeout_ms: int | None = Field(default=None, ge=100, le=600_000)
+    confirm: bool = False
 
 
 def _spec(name: ToolName, description: str, args: type[BaseModel]) -> ToolSpec:

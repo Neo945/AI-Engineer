@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from app.core.config import Settings
 from app.executor.git import GitOutput, run_git
 from app.executor.paths import PathTraversalError, resolve_within
+from app.executor.policy import CommandPolicy, CommandTier, policy_message
 from app.executor.sandbox import SandboxLimits, SandboxManager, SandboxOutput
 from app.tools.registry import Handler, ToolRegistry
 from app.tools.schemas import ToolCall, ToolName, ToolResult
@@ -55,12 +56,14 @@ class ToolExecutor:
         sandboxes: SandboxManager,
         mount_target: str = "/workspace",
         default_timeout_ms: int = 30_000,
+        policy: CommandPolicy | None = None,
     ) -> None:
         self._workspace_dir = Path(os.path.realpath(workspace_dir))
         self._registry = registry
         self._sandboxes = sandboxes
         self._mount_target = Path(mount_target)
         self._default_timeout_ms = default_timeout_ms
+        self._policy = policy or CommandPolicy()
         self._register()
 
     @classmethod
@@ -93,6 +96,7 @@ class ToolExecutor:
             registry=ToolRegistry(),
             sandboxes=manager,
             default_timeout_ms=settings.sandbox_default_timeout_ms,
+            policy=CommandPolicy.from_settings(settings),
         )
 
     @property
@@ -227,6 +231,11 @@ class ToolExecutor:
 
     async def _terminal_run(self, call: ToolCall, args: BaseModel) -> ToolResult:
         arguments = cast(TerminalRunArgs, args)
+        tier = self._policy.classify(arguments.command)
+        if tier is CommandTier.DENY:
+            return self._fail(call, policy_message(tier, arguments.command))
+        if tier is CommandTier.CONFIRM and not arguments.confirm:
+            return self._fail(call, policy_message(tier, arguments.command))
         timeout_ms = arguments.timeout_ms or call.timeout_ms or self._default_timeout_ms
         sandbox = await self._sandboxes.get_or_start(self._workspace_dir)
         container_workdir: str | None = None

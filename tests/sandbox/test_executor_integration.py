@@ -7,6 +7,8 @@ the sandbox), returning a ToolResult.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from app.executor.executor import ToolExecutor
@@ -58,3 +60,27 @@ async def test_terminal_workdir(executor: ToolExecutor) -> None:
 async def test_terminal_rejects_workdir_escape(executor: ToolExecutor) -> None:
     result = await _call(executor, ToolName.TERMINAL_RUN, command="pwd", workdir="../escape")
     assert result.ok is False
+
+
+async def test_terminal_denies_destructive_command(executor: ToolExecutor) -> None:
+    result = await _call(executor, ToolName.TERMINAL_RUN, command="rm -rf build")
+    assert result.ok is False
+    assert "safety policy" in (result.error or "")
+    assert "file_delete" in (result.error or "")
+    assert not Path("build").exists()
+
+
+async def test_terminal_requires_confirm_for_destructive_command(
+    executor: ToolExecutor,
+) -> None:
+    result = await _call(executor, ToolName.TERMINAL_RUN, command="git push origin main")
+    assert result.ok is False
+    assert "confirm=true" in (result.error or "")
+
+    confirmed = await _call(
+        executor,
+        ToolName.TERMINAL_RUN,
+        command="git push origin main",
+        confirm=True,
+    )
+    assert confirmed.ok or "confirm" not in (confirmed.error or "")
