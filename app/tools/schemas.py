@@ -23,6 +23,7 @@ class ToolName(StrEnum):
 
     FILE_READ = "file_read"
     FILE_WRITE = "file_write"
+    FILE_EDIT = "file_edit"
     FILE_LIST = "file_list"
     FILE_SEARCH = "file_search"
     FILE_DELETE = "file_delete"

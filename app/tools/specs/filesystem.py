@@ -30,6 +30,19 @@ class WriteFileArgs(BaseModel):
     content: str
 
 
+class EditFileArgs(BaseModel):
+    """Apply a unified diff to a file in the workspace.
+
+    Prefer this over ``file_write`` for surgical changes: context and removed
+    lines must match the current file exactly, so a stale or wrong diff fails
+    loudly instead of silently clobbering content. The diff may be a bare
+    hunk block or include ``--- a/...`` / ``+++ b/...`` headers.
+    """
+
+    path: str
+    diff: str = Field(min_length=1, max_length=100_000)
+
+
 class ListFilesArgs(BaseModel):
     """List entries under a workspace directory."""
 
@@ -68,6 +81,12 @@ def _spec(name: ToolName, description: str, args: type[BaseModel]) -> ToolSpec:
 SPECS: list[ToolSpec] = [
     _spec(ToolName.FILE_READ, "Read a text file from the workspace.", ReadFileArgs),
     _spec(ToolName.FILE_WRITE, "Create or overwrite a file in the workspace.", WriteFileArgs),
+    _spec(
+        ToolName.FILE_EDIT,
+        "Apply a unified diff to a file in the workspace. Prefer over "
+        "file_write for surgical edits.",
+        EditFileArgs,
+    ),
     _spec(ToolName.FILE_LIST, "List files and directories under a workspace path.", ListFilesArgs),
     _spec(ToolName.FILE_SEARCH, "Search the workspace for files matching a glob.", SearchFilesArgs),
     _spec(ToolName.FILE_DELETE, "Delete a file or directory from the workspace.", DeleteFileArgs),
@@ -77,6 +96,7 @@ SPECS: list[ToolSpec] = [
 MODELS: dict[ToolName, type[BaseModel]] = {
     ToolName.FILE_READ: ReadFileArgs,
     ToolName.FILE_WRITE: WriteFileArgs,
+    ToolName.FILE_EDIT: EditFileArgs,
     ToolName.FILE_LIST: ListFilesArgs,
     ToolName.FILE_SEARCH: SearchFilesArgs,
     ToolName.FILE_DELETE: DeleteFileArgs,

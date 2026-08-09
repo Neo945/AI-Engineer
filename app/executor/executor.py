@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from app.core.config import Settings
 from app.executor.git import GitOutput, run_git
+from app.executor.patch import PatchError, apply_unified_diff
 from app.executor.paths import PathTraversalError, resolve_within
 from app.executor.policy import CommandPolicy, CommandTier, policy_message
 from app.executor.sandbox import SandboxLimits, SandboxManager, SandboxOutput
@@ -28,6 +29,7 @@ from app.tools.schemas import ToolCall, ToolName, ToolResult
 from app.tools.specs import ALL_SPECS, ARGUMENT_MODELS
 from app.tools.specs.filesystem import (
     DeleteFileArgs,
+    EditFileArgs,
     ListFilesArgs,
     MoveFileArgs,
     ReadFileArgs,
@@ -117,6 +119,7 @@ class ToolExecutor:
         table: dict[ToolName, Handler] = {
             ToolName.FILE_READ: self._read_file,
             ToolName.FILE_WRITE: self._write_file,
+            ToolName.FILE_EDIT: self._edit_file,
             ToolName.FILE_LIST: self._list_files,
             ToolName.FILE_SEARCH: self._search_files,
             ToolName.FILE_DELETE: self._delete_file,
@@ -159,6 +162,27 @@ class ToolExecutor:
             return self._fail(call, str(exc))
         await asyncio.to_thread(_write_file, path, arguments.content)
         return self._ok(call, f"wrote {len(arguments.content)} bytes to {arguments.path}")
+
+    async def _edit_file(self, call: ToolCall, args: BaseModel) -> ToolResult:
+        arguments = cast(EditFileArgs, args)
+        try:
+            path = resolve_within(self._workspace_dir, arguments.path)
+        except PathTraversalError as exc:
+            return self._fail(call, str(exc))
+        if not path.is_file():
+            return self._fail(call, f"not a file: {arguments.path}")
+        content = await asyncio.to_thread(_read_text, path)
+        try:
+            new_content, edit = await asyncio.to_thread(apply_unified_diff, content, arguments.diff)
+        except PatchError as exc:
+            return self._fail(call, str(exc))
+        await asyncio.to_thread(_write_file, path, new_content)
+        return self._ok(
+            call,
+            f"edited {arguments.path}: "
+            f"{edit.old_lines} matched, {edit.new_lines} written across "
+            f"{edit.hunks} hunk(s)",
+        )
 
     async def _list_files(self, call: ToolCall, args: BaseModel) -> ToolResult:
         arguments = cast(ListFilesArgs, args)
@@ -357,6 +381,10 @@ def _read_bytes(path: Path, limit: int) -> tuple[bytes, bool]:
     truncated = path.stat().st_size > limit
     with path.open("rb") as handle:
         return handle.read(limit), truncated
+
+
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
 
 
 def _write_file(path: Path, content: str) -> None:

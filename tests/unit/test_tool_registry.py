@@ -98,6 +98,7 @@ def test_every_declared_tool_has_a_spec() -> None:
     declared = {
         ToolName.FILE_READ,
         ToolName.FILE_WRITE,
+        ToolName.FILE_EDIT,
         ToolName.FILE_LIST,
         ToolName.FILE_SEARCH,
         ToolName.FILE_DELETE,
