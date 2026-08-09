@@ -32,6 +32,9 @@ examples:
   engineer run fix the failing test
   engineer run --agent-type pipeline refactor the auth service
   engineer run -y drop the migration (approve the plan automatically)
+  engineer test                     run the project's test suite (sandboxed)
+  engineer test --fix               run tests and repair failures, then re-run
+  engineer review                   structured review of the working tree
   engineer tasks --limit 20
   engineer diff HEAD~1
   engineer commit -m "fix: ..."
@@ -92,10 +95,38 @@ def build_parser() -> ArgumentParser:
     cancel.add_argument("task_id", help="the task id")
     cancel.set_defaults(handler=_cmd_cancel)
 
-    subparsers.add_parser("review", help="structured code review (skeleton)").set_defaults(
-        handler=_cmd_review
+    review = subparsers.add_parser("review", help="review the working tree's changes")
+    review.add_argument("--ref", help="review the diff against this revision instead")
+    review.add_argument(
+        "--max-steps",
+        type=int,
+        default=8,
+        help="upper bound on reviewer LLM calls (default: 8)",
     )
-    subparsers.add_parser("test", help="test execution (skeleton)").set_defaults(handler=_cmd_test)
+    review.set_defaults(handler=_cmd_review)
+
+    test = subparsers.add_parser("test", help="run the project's test suite")
+    test.add_argument(
+        "--command",
+        dest="test_command",
+        help="test command override (auto-detected when omitted)",
+    )
+    test.add_argument(
+        "--framework",
+        choices=("pytest", "jest", "generic"),
+        help="runner family override (auto-detected when omitted)",
+    )
+    test.add_argument(
+        "--fix",
+        action="store_true",
+        help="fix failing tests and re-run (test-and-repair loop)",
+    )
+    test.add_argument(
+        "--repairs",
+        type=int,
+        help="max fix->re-run iterations with --fix (default: TEST_MAX_REPAIRS)",
+    )
+    test.set_defaults(handler=_cmd_test)
     return parser
 
 
@@ -174,13 +205,27 @@ async def _cmd_cancel(
 async def _cmd_review(
     ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
 ) -> int:
-    return await commands.cmd_review(ctx, repo=repo, state=state)
+    return await commands.cmd_review(
+        ctx,
+        repo=repo,
+        state=state,
+        ref=args.ref,
+        max_steps=args.max_steps,
+    )
 
 
 async def _cmd_test(
     ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
 ) -> int:
-    return await commands.cmd_test(ctx, repo=repo, state=state)
+    return await commands.cmd_test(
+        ctx,
+        repo=repo,
+        state=state,
+        command=args.test_command,
+        framework=args.framework,
+        fix=args.fix,
+        repairs=args.repairs,
+    )
 
 
 async def arun(argv: Sequence[str] | None, ctx: CliContext) -> int:

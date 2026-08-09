@@ -21,8 +21,12 @@ from rich.prompt import Confirm
 from rich.syntax import Syntax
 from rich.table import Table
 
+from app.agents.base import DEFAULT_MAX_STEPS, LoopAgent
+from app.agents.pipeline import REVIEWER_PROMPT
 from app.agents.planning import TaskPlan, format_plan
+from app.agents.repair import RepairAgent
 from app.cli.context import (
+    LLM_UNCONFIGURED_HINT,
     CliContext,
     CliError,
     WorkspaceState,
@@ -35,10 +39,15 @@ from app.database.models.task import Task
 from app.database.models.workspace import Workspace
 from app.database.repositories.task import TaskRepository
 from app.database.repositories.workspace import WorkspaceRepository
+from app.executor.executor import ToolExecutor, _detect_test_command
 from app.executor.git import GitOutput, run_git
+from app.executor.test_parser import TestReport, format_report
+from app.llm.factory import build_llm_client
 from app.llm.messages import ChatMessage, ChatRole
+from app.llm.protocol import LLMProvider
 from app.orchestrator.orchestrator import Orchestrator, OrchestratorEvent
 from app.retrieval.indexer import RepositoryIndexer
+from app.tools.schemas import ToolCall, ToolName
 
 _TERMINAL_STATUSES = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED})
 _TERMINAL_EVENT_KINDS = frozenset({"completed", "failed", "cancelled"})
@@ -70,6 +79,43 @@ async def _git(
         return await run_git(repo, args, stdin_data=stdin_data)
     except FileNotFoundError as exc:
         raise CliError("git is required but was not found on PATH") from exc
+
+
+def _build_llm(ctx: CliContext) -> LLMProvider:
+    """Build the configured LLM client, or raise a friendly error."""
+    try:
+        return build_llm_client(ctx.settings)
+    except Exception as exc:
+        raise CliError(LLM_UNCONFIGURED_HINT) from exc
+
+
+def _build_executor(ctx: CliContext, repo: Path) -> ToolExecutor:
+    """Build a sandbox executor bound to ``repo`` from settings."""
+    return ToolExecutor.build(workspace_dir=repo, settings=ctx.settings)
+
+
+def _resolve_test_run(
+    repo: Path,
+    command: str | None,
+    framework: str | None,
+) -> tuple[str, str]:
+    """Resolve the test command and runner family, auto-detecting omitted ones."""
+    detected_command, detected_framework = _detect_test_command(repo)
+    return command or detected_command, framework or detected_framework
+
+
+def _final_verdict(answer: str) -> str | None:
+    """Return the token after the last ``VERDICT:`` line, if present."""
+    for line in reversed(answer.strip().splitlines()):
+        stripped = line.strip()
+        if stripped.upper().startswith("VERDICT:"):
+            token = stripped.split(":", 1)[1].strip().upper()
+            return token
+    return None
+
+
+def _verdict_passed(answer: str) -> bool:
+    return _final_verdict(answer) == "PASS"
 
 
 async def cmd_init(ctx: CliContext, *, repo: Path, name: str | None) -> int:
@@ -414,33 +460,118 @@ async def cmd_cancel(ctx: CliContext, *, repo: Path, state: WorkspaceState, task
     return 0
 
 
-async def cmd_review(ctx: CliContext, *, repo: Path, state: WorkspaceState | None) -> int:
-    """Skeleton: dedicated structured review lands in the review phases."""
-    ctx.console.print(
-        Panel(
-            "Dedicated review mode (structured findings with severity/file/"
-            "line/fix) lands in the review phases.\n"
-            "Today you can get the pipeline's reviewer by running a goal with "
-            "--agent-type pipeline.",
-            title="engineer review",
-            border_style="yellow",
+async def cmd_review(
+    ctx: CliContext,
+    *,
+    repo: Path,
+    state: WorkspaceState | None,
+    ref: str | None = None,
+    max_steps: int = DEFAULT_MAX_STEPS,
+    llm: LLMProvider | None = None,
+    executor: ToolExecutor | None = None,
+) -> int:
+    """Run a structured code review of the working tree (or a diff).
+
+    The reviewer inspects the changes with read-only tools (git status, git
+    diff, file_read) and ends with ``VERDICT: PASS`` or
+    ``VERDICT: CHANGES_NEEDED`` plus actionable feedback. Exit code 0 means
+    PASS; any other outcome exits 1.
+    """
+    if llm is None:
+        llm = _build_llm(ctx)
+    if executor is None:
+        executor = _build_executor(ctx, repo)
+    try:
+        target = "the working tree" if ref is None else f"the diff against {ref}"
+        seed = ChatMessage(
+            role=ChatRole.USER,
+            content=(
+                f"Review {target} in this repository. Use the git status and "
+                "git diff tools (and file_read) to inspect the changes. Report "
+                "your findings, then end with exactly one line first: "
+                "'VERDICT: PASS' or 'VERDICT: CHANGES_NEEDED' followed by "
+                "actionable feedback."
+            ),
         )
-    )
-    return 0
+        agent = LoopAgent(
+            llm=llm,
+            executor=executor,
+            system_prompt=REVIEWER_PROMPT,
+            max_steps=max_steps,
+            max_tokens=ctx.settings.llm_max_tokens,
+            temperature=ctx.settings.llm_temperature,
+        )
+        result = await agent.run_from([seed])
+        ctx.console.print(result.answer)
+        return 0 if _verdict_passed(result.answer) else 1
+    finally:
+        await executor.sandboxes.close()
 
 
-async def cmd_test(ctx: CliContext, *, repo: Path, state: WorkspaceState | None) -> int:
-    """Skeleton: real test execution lands in the test-and-repair phase."""
-    ctx.console.print(
-        Panel(
-            "Real test execution with a test-and-repair loop lands in the "
-            "test-and-repair phase.\n"
-            "Today the pipeline's tester stage returns a simulated verdict.",
-            title="engineer test",
-            border_style="yellow",
+async def cmd_test(
+    ctx: CliContext,
+    *,
+    repo: Path,
+    state: WorkspaceState | None,
+    command: str | None = None,
+    framework: str | None = None,
+    fix: bool = False,
+    repairs: int | None = None,
+    llm: LLMProvider | None = None,
+    executor: ToolExecutor | None = None,
+) -> int:
+    """Run the project's test suite in the sandbox, optionally fixing failures.
+
+    Without ``fix`` the suite runs once and the structured report is printed.
+    With ``fix`` a test-and-repair loop fixes failing tests and re-runs them,
+    bounded by ``repairs`` (defaults to ``test_max_repairs``). Exit code 0
+    means all tests passed.
+    """
+    if executor is None:
+        executor = _build_executor(ctx, repo)
+    try:
+        if fix:
+            if llm is None:
+                llm = _build_llm(ctx)
+            max_repairs = repairs if repairs is not None else ctx.settings.test_max_repairs
+            agent = RepairAgent(
+                llm=llm,
+                executor=executor,
+                max_repairs=max_repairs,
+                test_command=command,
+                test_framework=framework,
+            )
+            repair = await agent.run(
+                "Run the project's test suite and fix any failing tests."
+            )
+            ctx.console.print(repair.answer)
+            return 0 if _verdict_passed(repair.answer) else 1
+
+        resolved_command, resolved_framework = _resolve_test_run(repo, command, framework)
+        tool_result = await executor.execute(
+            ToolCall(
+                tool=ToolName.TEST_RUN,
+                arguments={
+                    "command": resolved_command,
+                    "framework": resolved_framework,
+                },
+            )
         )
-    )
-    return 0
+        payload = tool_result.data.get("report")
+        report = (
+            TestReport.from_dict(payload)
+            if payload
+            else TestReport(
+                framework=resolved_framework,
+                command=resolved_command,
+                failed=0 if tool_result.ok else 1,
+                output=tool_result.output,
+            )
+        )
+        ctx.console.print(format_report(report))
+        return 0 if report.ok else 1
+    finally:
+        await executor.sandboxes.close()
 
 
 def render_event(console: Console, event: OrchestratorEvent) -> None:

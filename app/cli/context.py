@@ -36,7 +36,7 @@ STATE_DIR_NAME = ".engineer"
 STATE_FILE_NAME = "state.json"
 CLI_USER_EMAIL = "cli@local"
 
-_LLM_UNCONFIGURED_HINT = (
+LLM_UNCONFIGURED_HINT = (
     "LLM is not configured. Set LLM_PROVIDER, LLM_API_KEY, and/or LLM_BASE_URL "
     "in your environment or .env file."
 )
@@ -171,7 +171,7 @@ class CliContext:
         try:
             llm = build_llm_client(self.settings)
         except Exception as exc:
-            raise CliError(_LLM_UNCONFIGURED_HINT) from exc
+            raise CliError(LLM_UNCONFIGURED_HINT) from exc
         return Orchestrator(
             session_factory=container.session_factory,
             llm=llm,

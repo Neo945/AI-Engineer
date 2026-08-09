@@ -70,6 +70,8 @@ class RepairAgent:
             boundaries; when ``True`` the run raises :class:`TaskCancelled`.
         test_command: Override for the test command; auto-detected when
             ``None``.
+        test_framework: Override for the runner family; auto-detected when
+            ``None``.
     """
 
     def __init__(
@@ -84,6 +86,7 @@ class RepairAgent:
         on_message: Callable[[ChatMessage], Awaitable[None] | None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
         test_command: str | None = None,
+        test_framework: str | None = None,
     ) -> None:
         self._llm = llm
         self._executor = executor
@@ -94,6 +97,7 @@ class RepairAgent:
         self._on_message = on_message
         self._should_cancel = should_cancel
         self._test_command = test_command
+        self._test_framework = test_framework
 
     async def run(
         self,
@@ -167,9 +171,12 @@ class RepairAgent:
         )
 
     def _resolve_test_command(self) -> tuple[str, str]:
+        command, framework = _detect_test_command(self._executor.workspace_dir)
         if self._test_command:
-            return self._test_command, "pytest"
-        return _detect_test_command(self._executor.workspace_dir)
+            command = self._test_command
+        if self._test_framework:
+            framework = self._test_framework
+        return command, framework
 
     async def _run_tests(self, command: str, framework: str) -> TestReport:
         result = await self._executor.execute(

@@ -14,13 +14,16 @@ from pathlib import Path
 
 import pytest
 from rich.console import Console
+from tests.unit.fake_llm import FakeLLM
 
 from app.cli.commands import (
     _short,
     _snippet,
     cmd_commit,
     cmd_diff,
+    cmd_review,
     cmd_run,
+    cmd_test,
     render_event,
 )
 from app.cli.context import (
@@ -36,9 +39,12 @@ from app.cli.main import arun, build_parser
 from app.core.config import Settings
 from app.database.models.enums import TaskStatus
 from app.database.models.task import Task
+from app.executor.test_parser import TestReport
 from app.llm.messages import ChatMessage, ChatRole, ToolRequest
+from app.llm.protocol import LLMResponse, LLMUsage
 from app.orchestrator.broker import EventBroker
 from app.orchestrator.orchestrator import OrchestratorEvent
+from app.tools.schemas import ToolCall, ToolName, ToolResult, ToolSpec
 
 
 def _settings() -> Settings:
@@ -487,3 +493,202 @@ async def test_cmd_run_yes_approves_write_plan(tmp_path: Path) -> None:
     out = buffer.getvalue()
     assert "plan approved" in out
     assert "completed" in out
+
+
+class _StubSandboxes:
+    async def close(self) -> None:
+        return None
+
+
+class _StubRegistry:
+    def specs(self) -> list[ToolSpec]:
+        return []
+
+
+class _StubExecutor:
+    def __init__(self, workspace_dir: Path, reports: list[TestReport] | None = None) -> None:
+        self.workspace_dir = workspace_dir
+        self.registry = _StubRegistry()
+        self.sandboxes = _StubSandboxes()
+        self._reports = list(reports or [])
+        self.calls: list[ToolCall] = []
+
+    async def execute(self, call: ToolCall) -> ToolResult:
+        self.calls.append(call)
+        report = (
+            self._reports.pop(0)
+            if self._reports
+            else TestReport(framework="pytest", command="pytest -q")
+        )
+        return ToolResult(
+            call_id=call.id,
+            tool=call.tool,
+            ok=report.ok,
+            output="report",
+            data={"report": report.to_dict()},
+        )
+
+
+def _report(*, ok: bool) -> TestReport:
+    return TestReport(
+        framework="pytest",
+        command="pytest -q",
+        passed=1 if ok else 0,
+        failed=0 if ok else 1,
+    )
+
+
+def _response(content: str) -> LLMResponse:
+    return LLMResponse(
+        content=content,
+        stop_reason="end_turn",
+        usage=LLMUsage(input_tokens=2, output_tokens=1),
+        model="fake-model",
+    )
+
+
+def test_final_verdict_detection() -> None:
+    from app.cli.commands import _final_verdict, _verdict_passed
+
+    assert _final_verdict("VERDICT: PASS\nNo issues.") == "PASS"
+    assert _final_verdict("## Findings\n...\nVERDICT: CHANGES_NEEDED") == "CHANGES_NEEDED"
+    assert _final_verdict("no verdict anywhere") is None
+    assert _verdict_passed("## Findings\n...\nVERDICT: PASS") is True
+    assert _verdict_passed("VERDICT: FAIL") is False
+
+
+def test_parser_test_and_review_defaults() -> None:
+    parser = build_parser()
+
+    test = parser.parse_args(["test"])
+    assert test.command == "test"
+    assert test.test_command is None
+    assert test.framework is None
+    assert test.fix is False
+    assert test.repairs is None
+
+    fixed = parser.parse_args(["test", "--fix", "--command", "make test", "--repairs", "3"])
+    assert fixed.fix is True
+    assert fixed.test_command == "make test"
+    assert fixed.repairs == 3
+
+    jest = parser.parse_args(["test", "--framework", "jest"])
+    assert jest.framework == "jest"
+
+    review = parser.parse_args(["review"])
+    assert review.ref is None
+    assert review.max_steps == 8
+
+    review_ref = parser.parse_args(["review", "--ref", "HEAD~1", "--max-steps", "3"])
+    assert review_ref.ref == "HEAD~1"
+    assert review_ref.max_steps == 3
+
+
+async def test_cmd_test_runs_suite_and_reports_failure(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    stub = _StubExecutor(repo, [_report(ok=False)])
+
+    code = await cmd_test(ctx, repo=repo, state=None, executor=stub)
+
+    assert code == 1
+    assert stub.calls[0].tool == ToolName.TEST_RUN
+    assert stub.calls[0].arguments["command"] == "python -m pytest -q"
+    assert "1 failed" in buffer.getvalue()
+
+
+async def test_cmd_test_passing_suite_exits_zero(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    stub = _StubExecutor(repo, [_report(ok=True)])
+
+    code = await cmd_test(ctx, repo=repo, state=None, executor=stub)
+
+    assert code == 0
+    assert "All tests pass." in buffer.getvalue()
+
+
+async def test_cmd_test_repair_loop_fixes_failures(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    llm = FakeLLM([_response("Fixed it.\nVERDICT: PASS")])
+    stub = _StubExecutor(repo, [_report(ok=False), _report(ok=True)])
+
+    code = await cmd_test(ctx, repo=repo, state=None, fix=True, llm=llm, executor=stub)
+
+    assert code == 0
+    assert "VERDICT: PASS" in buffer.getvalue()
+
+
+async def test_cmd_test_repair_exhausts_attempts_exits_one(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    llm = FakeLLM([_response("try1\nVERDICT: FAIL"), _response("try2\nVERDICT: FAIL")])
+    stub = _StubExecutor(repo, [_report(ok=False), _report(ok=False), _report(ok=False)])
+
+    code = await cmd_test(
+        ctx, repo=repo, state=None, fix=True, repairs=2, llm=llm, executor=stub
+    )
+
+    assert code == 1
+    assert "VERDICT: FAIL" in buffer.getvalue()
+
+
+async def test_cmd_review_pass_exits_zero(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    llm = FakeLLM([_response("VERDICT: PASS\nNo issues.")])
+
+    code = await cmd_review(ctx, repo=repo, state=None, llm=llm, executor=_StubExecutor(repo))
+
+    assert code == 0
+    assert "VERDICT: PASS" in buffer.getvalue()
+
+
+async def test_cmd_review_changes_needed_exits_one(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    llm = FakeLLM([_response("VERDICT: CHANGES_NEEDED\nAdd tests.")])
+
+    code = await cmd_review(ctx, repo=repo, state=None, llm=llm, executor=_StubExecutor(repo))
+
+    assert code == 1
+    assert "CHANGES_NEEDED" in buffer.getvalue()
+
+
+async def test_cmd_test_fix_unconfigured_llm_is_friendly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+
+    def _boom(_settings: Settings) -> LLMResponse:
+        raise RuntimeError("no provider")
+
+    monkeypatch.setattr("app.cli.commands.build_llm_client", _boom)
+    console, _ = _console()
+    ctx = CliContext(console=console, settings=_settings())
+
+    with pytest.raises(CliError, match="LLM is not configured"):
+        await cmd_test(ctx, repo=repo, state=None, fix=True, executor=_StubExecutor(repo))
+
+
+async def test_cmd_review_unconfigured_llm_is_friendly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+
+    def _boom(_settings: Settings) -> LLMResponse:
+        raise RuntimeError("no provider")
+
+    monkeypatch.setattr("app.cli.commands.build_llm_client", _boom)
+    console, _ = _console()
+    ctx = CliContext(console=console, settings=_settings())
+
+    with pytest.raises(CliError, match="LLM is not configured"):
+        await cmd_review(ctx, repo=repo, state=None, executor=_StubExecutor(repo))

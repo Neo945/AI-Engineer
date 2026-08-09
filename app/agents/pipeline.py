@@ -45,7 +45,7 @@ _CODER_PROMPT = (
     "with a concise summary of what you changed and why."
 )
 
-_REVIEWER_PROMPT = (
+REVIEWER_PROMPT = (
     "You are a code reviewer working inside a user's repository. Inspect the "
     "changes the coder made using read-only tools (diff, read, status). "
     "Evaluate correctness, style, and test coverage against the plan. End "
@@ -249,7 +249,7 @@ class PipelineAgent:
         }
 
     async def _reviewer(self, state: PipelineState) -> dict[str, Any]:
-        result = await self._run_stage(state, system_prompt=_REVIEWER_PROMPT)
+        result = await self._run_stage(state, system_prompt=REVIEWER_PROMPT)
         passed = parse_verdict(result.answer)
         return {
             "messages": result.delta,
