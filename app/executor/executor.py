@@ -13,13 +13,13 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
-from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
 from pydantic import BaseModel
 
 from app.core.config import Settings
+from app.executor.git import GitOutput, run_git
 from app.executor.paths import PathTraversalError, resolve_within
 from app.executor.sandbox import SandboxLimits, SandboxManager, SandboxOutput
 from app.tools.registry import Handler, ToolRegistry
@@ -37,16 +37,6 @@ from app.tools.specs.git import GitCommitArgs, GitDiffArgs
 from app.tools.specs.terminal import TerminalRunArgs
 
 MAX_OUTPUT_CHARS = 200_000
-
-
-@dataclass
-class GitOutput:
-    """Result of a host-side git invocation."""
-
-    exit_code: int | None
-    stdout: str
-    stderr: str
-    timed_out: bool = False
 
 
 class ToolExecutor:
@@ -258,7 +248,7 @@ class ToolExecutor:
         return self._sandbox_result(call, output, timeout_ms)
 
     async def _git_status(self, call: ToolCall, args: BaseModel) -> ToolResult:
-        output = await _run_git(
+        output = await run_git(
             self._workspace_dir,
             ["status", "--short", "--branch"],
             stdin_data=None,
@@ -271,7 +261,7 @@ class ToolExecutor:
         command = ["diff", "--no-color"]
         if arguments.ref:
             command = ["diff", "--no-color", arguments.ref]
-        output = await _run_git(
+        output = await run_git(
             self._workspace_dir,
             command,
             stdin_data=None,
@@ -281,7 +271,7 @@ class ToolExecutor:
 
     async def _git_commit(self, call: ToolCall, args: BaseModel) -> ToolResult:
         arguments = cast(GitCommitArgs, args)
-        stage = await _run_git(
+        stage = await run_git(
             self._workspace_dir,
             ["add", "-A"],
             stdin_data=None,
@@ -293,7 +283,7 @@ class ToolExecutor:
         if arguments.allow_empty:
             command.append("--allow-empty")
         command += ["-F", "-"]
-        output = await _run_git(
+        output = await run_git(
             self._workspace_dir,
             command,
             stdin_data=arguments.message,
@@ -417,47 +407,3 @@ def _search_glob(
         if len(matches) >= max_results:
             break
     return matches
-
-
-async def _run_git(
-    workspace_dir: Path,
-    args: list[str],
-    *,
-    stdin_data: str | None,
-    timeout_ms: int,
-) -> GitOutput:
-    env = {
-        **os.environ,
-        "GIT_TERMINAL_PROMPT": "0",
-        "GIT_PAGER": "cat",
-        "GIT_CONFIG_NOSYSTEM": "1",
-    }
-    command = ["git", "-c", "core.hooksPath=/dev/null", *args]
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=workspace_dir,
-        env=env,
-        stdin=asyncio.subprocess.PIPE if stdin_data is not None else None,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    timeout_secs = max(1.0, timeout_ms / 1000)
-    try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(stdin_data.encode("utf-8") if stdin_data is not None else None),
-            timeout=timeout_secs,
-        )
-    except TimeoutError:
-        process.kill()
-        await process.wait()
-        return GitOutput(
-            exit_code=None,
-            stdout="",
-            stderr=f"git command timed out after {timeout_ms}ms",
-            timed_out=True,
-        )
-    return GitOutput(
-        exit_code=process.returncode,
-        stdout=stdout.decode("utf-8", errors="replace"),
-        stderr=stderr.decode("utf-8", errors="replace"),
-    )

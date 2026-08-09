@@ -7,7 +7,8 @@ workspace root. This package is the primary security boundary of the system.
 
 from __future__ import annotations
 
-from app.executor.executor import GitOutput, ToolExecutor
+from app.executor.executor import ToolExecutor
+from app.executor.git import GitOutput, run_git
 from app.executor.paths import PathTraversalError, resolve_within
 from app.executor.sandbox import (
     Sandbox,
@@ -25,4 +26,5 @@ __all__ = [
     "SandboxOutput",
     "ToolExecutor",
     "resolve_within",
+    "run_git",
 ]
