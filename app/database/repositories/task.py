@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
@@ -66,3 +67,23 @@ class TaskRepository(BaseRepository[Task, uuid.UUID]):
             .order_by(Task.created_at.asc(), Task.id.asc())
         )
         return (await self._session.scalars(stmt)).all()
+
+    async def set_plan(
+        self,
+        task: Task,
+        *,
+        plan: dict[str, Any],
+        needs_approval: bool,
+    ) -> Task:
+        """Persist a task's plan artifact and reset its approval decision."""
+        task.plan = plan
+        task.plan_needs_approval = needs_approval
+        task.plan_approved = None
+        await self._session.commit()
+        return task
+
+    async def set_approval(self, task: Task, *, approved: bool) -> Task:
+        """Record a human approval or rejection of the task's plan."""
+        task.plan_approved = approved
+        await self._session.commit()
+        return task

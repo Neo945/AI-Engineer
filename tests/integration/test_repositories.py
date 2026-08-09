@@ -116,12 +116,42 @@ async def test_task_hierarchy(db_session: AsyncSession) -> None:
         )
     )
     assert parent.status == TaskStatus.PENDING
+    assert parent.plan is None
+    assert parent.plan_needs_approval is False
+    assert parent.plan_approved is None
 
     children = await task_repo.list_children(parent.id)
     assert [t.id for t in children] == [child.id]
 
     by_session = await task_repo.list_by_session(session.id)
     assert {t.id for t in by_session} == {parent.id, child.id}
+
+
+async def test_task_plan_and_approval_persist(db_session: AsyncSession) -> None:
+    """A task plan artifact and its approval decision round-trip."""
+    user = await _create_user(db_session)
+    ws = await _create_workspace(db_session, user.id)
+    session = await _create_session(db_session, ws.id, user.id)
+    task_repo = TaskRepository(db_session)
+    task = await task_repo.add(
+        Task(session_id=session.id, agent_type="coder", goal="Add a healthcheck")
+    )
+
+    await task_repo.set_plan(
+        task,
+        plan={"objective": "Add /healthz", "files": ["app/main.py"]},
+        needs_approval=True,
+    )
+
+    fetched = await task_repo.get(task.id)
+    assert fetched is not None
+    assert fetched.plan == {"objective": "Add /healthz", "files": ["app/main.py"]}
+    assert fetched.plan_needs_approval is True
+    assert fetched.plan_approved is None
+
+    await task_repo.set_approval(task, approved=True)
+    fetched = await task_repo.get(task.id)
+    assert fetched is not None and fetched.plan_approved is True
 
 
 async def test_message_transcript_ordering(db_session: AsyncSession) -> None:

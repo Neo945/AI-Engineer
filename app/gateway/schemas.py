@@ -35,6 +35,9 @@ class TaskResponse(BaseModel):
     max_attempts: int
     input_tokens: int
     output_tokens: int
+    plan: dict[str, Any] | None
+    plan_needs_approval: bool
+    plan_approved: bool | None
     started_at: datetime | None
     finished_at: datetime | None
     created_at: datetime
