@@ -24,6 +24,7 @@ from app.executor.patch import PatchError, apply_unified_diff
 from app.executor.paths import PathTraversalError, resolve_within
 from app.executor.policy import CommandPolicy, CommandTier, policy_message
 from app.executor.sandbox import SandboxLimits, SandboxManager, SandboxOutput
+from app.executor.test_parser import format_report, parse_test_output
 from app.tools.registry import Handler, ToolRegistry
 from app.tools.schemas import ToolCall, ToolName, ToolResult
 from app.tools.specs import ALL_SPECS, ARGUMENT_MODELS
@@ -38,8 +39,27 @@ from app.tools.specs.filesystem import (
 )
 from app.tools.specs.git import GitCommitArgs, GitDiffArgs
 from app.tools.specs.terminal import TerminalRunArgs
+from app.tools.specs.tests import TestRunArgs
 
 MAX_OUTPUT_CHARS = 200_000
+
+
+def _detect_test_command(workspace_dir: Path) -> tuple[str, str]:
+    """Choose a test command for the workspace.
+
+    Returns ``(command, framework)``. Package-manager projects prefer the
+    project's own test script; otherwise pytest markers decide, with a plain
+    ``tests/`` directory as the last heuristic.
+    """
+    if (workspace_dir / "package.json").exists():
+        return "npm test", "jest"
+    markers = ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini")
+    if (
+        any((workspace_dir / marker).exists() for marker in markers)
+        or (workspace_dir / "tests").is_dir()
+    ):
+        return "python -m pytest -q", "pytest"
+    return "python -m pytest -q", "pytest"
 
 
 class ToolExecutor:
@@ -107,6 +127,11 @@ class ToolExecutor:
         return self._registry
 
     @property
+    def workspace_dir(self) -> Path:
+        """The workspace root this executor is confined to."""
+        return self._workspace_dir
+
+    @property
     def sandboxes(self) -> SandboxManager:
         """The sandbox manager handling terminal execution for this workspace."""
         return self._sandboxes
@@ -125,6 +150,7 @@ class ToolExecutor:
             ToolName.FILE_DELETE: self._delete_file,
             ToolName.FILE_MOVE: self._move_file,
             ToolName.TERMINAL_RUN: self._terminal_run,
+            ToolName.TEST_RUN: self._test_run,
             ToolName.GIT_STATUS: self._git_status,
             ToolName.GIT_DIFF: self._git_diff,
             ToolName.GIT_COMMIT: self._git_commit,
@@ -260,25 +286,94 @@ class ToolExecutor:
             return self._fail(call, policy_message(tier, arguments.command))
         if tier is CommandTier.CONFIRM and not arguments.confirm:
             return self._fail(call, policy_message(tier, arguments.command))
+        container_workdir, workdir_error = self._resolve_workdir(arguments.workdir)
+        if workdir_error is not None:
+            return self._fail(call, workdir_error)
         timeout_ms = arguments.timeout_ms or call.timeout_ms or self._default_timeout_ms
         sandbox = await self._sandboxes.get_or_start(self._workspace_dir)
-        container_workdir: str | None = None
-        if arguments.workdir != ".":
-            try:
-                workdir_path = resolve_within(self._workspace_dir, arguments.workdir)
-            except PathTraversalError as exc:
-                return self._fail(call, str(exc))
-            if not workdir_path.is_dir():
-                return self._fail(call, f"not a directory: {arguments.workdir}")
-            container_workdir = str(
-                self._mount_target / workdir_path.relative_to(self._workspace_dir)
-            )
         output = await sandbox.run(
             arguments.command,
             timeout_ms=timeout_ms,
             workdir=container_workdir,
         )
         return self._sandbox_result(call, output, timeout_ms)
+
+    async def _test_run(self, call: ToolCall, args: BaseModel) -> ToolResult:
+        arguments = cast(TestRunArgs, args)
+        command = arguments.command
+        framework = arguments.framework
+        if not command:
+            command, detected = _detect_test_command(self._workspace_dir)
+            framework = framework or detected
+        elif not framework:
+            framework = _detect_test_command(self._workspace_dir)[1]
+        tier = self._policy.classify(command)
+        if tier is CommandTier.DENY:
+            return self._fail(call, policy_message(tier, command))
+        if tier is CommandTier.CONFIRM and not arguments.confirm:
+            return self._fail(call, policy_message(tier, command))
+        container_workdir, workdir_error = self._resolve_workdir(arguments.workdir)
+        if workdir_error is not None:
+            return self._fail(call, workdir_error)
+        timeout_ms = arguments.timeout_ms or call.timeout_ms or self._default_timeout_ms
+        sandbox = await self._sandboxes.get_or_start(self._workspace_dir)
+        output = await sandbox.run(
+            command,
+            timeout_ms=timeout_ms,
+            workdir=container_workdir,
+        )
+        report = parse_test_output(
+            framework,
+            command,
+            output.stdout,
+            exit_code=output.exit_code,
+            timed_out=output.timed_out,
+        )
+        if output.timed_out:
+            return ToolResult(
+                call_id=call.id,
+                tool=call.tool,
+                ok=False,
+                output=format_report(report),
+                error=f"test run timed out after {timeout_ms}ms",
+                exit_code=output.exit_code,
+                data={"report": report.to_dict()},
+            )
+        if report.ok:
+            return ToolResult(
+                call_id=call.id,
+                tool=call.tool,
+                ok=True,
+                output=format_report(report),
+                exit_code=output.exit_code,
+                data={"report": report.to_dict()},
+            )
+        return ToolResult(
+            call_id=call.id,
+            tool=call.tool,
+            ok=False,
+            output=format_report(report),
+            error=f"{report.failed} test(s) failed, {report.errors} error(s)",
+            exit_code=output.exit_code,
+            data={"report": report.to_dict()},
+        )
+
+    def _resolve_workdir(self, workdir: str) -> tuple[str | None, str | None]:
+        """Map a workspace-relative ``workdir`` to its sandbox mount path.
+
+        Returns ``(container_workdir, error)``; ``container_workdir`` is
+        ``None`` for the workspace root and ``error`` is set when the path
+        escapes the workspace or is not a directory.
+        """
+        if workdir == ".":
+            return None, None
+        try:
+            path = resolve_within(self._workspace_dir, workdir)
+        except PathTraversalError as exc:
+            return None, str(exc)
+        if not path.is_dir():
+            return None, f"not a directory: {workdir}"
+        return str(self._mount_target / path.relative_to(self._workspace_dir)), None
 
     async def _git_status(self, call: ToolCall, args: BaseModel) -> ToolResult:
         output = await run_git(

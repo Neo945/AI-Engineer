@@ -104,6 +104,7 @@ def test_every_declared_tool_has_a_spec() -> None:
         ToolName.FILE_DELETE,
         ToolName.FILE_MOVE,
         ToolName.TERMINAL_RUN,
+        ToolName.TEST_RUN,
         ToolName.GIT_STATUS,
         ToolName.GIT_DIFF,
         ToolName.GIT_COMMIT,

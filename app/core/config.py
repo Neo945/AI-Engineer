@@ -47,6 +47,10 @@ class Settings(BaseSettings):
         pipeline_max_passes: Upper bound on rework round-trips (reviewer→
             coder, tester→coder) in the multi-agent pipeline before it
             terminates with the latest verdict.
+        test_max_repairs: Upper bound on fix → re-run iterations in the
+            test-and-repair loop before the tester reports FAIL.
+        test_command: Override for the test command the tester runs; when
+            ``None`` it is auto-detected from the workspace.
         retrieval_enabled: Feed an assembled context window into the agent
             loop at the start of each run.
         retrieval_max_chunks: Cap on chunks in a retrieved context window.
@@ -98,6 +102,9 @@ class Settings(BaseSettings):
     task_max_attempts: int = Field(default=3, ge=1)
 
     pipeline_max_passes: int = Field(default=2, ge=0)
+
+    test_max_repairs: int = Field(default=2, ge=0)
+    test_command: str | None = None
 
     retrieval_enabled: bool = True
     retrieval_max_chunks: int = Field(default=20, ge=1)

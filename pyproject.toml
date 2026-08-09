@@ -81,3 +81,6 @@ asyncio_mode = "auto"
 markers = [
     "integration: requires PostgreSQL and Redis to be running (make up)",
 ]
+filterwarnings = [
+    "ignore:PytestCollectionWarning",
+]

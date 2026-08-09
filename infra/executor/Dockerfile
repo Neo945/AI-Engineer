@@ -6,6 +6,9 @@ RUN apk add --no-cache \
         curl \
         findutils \
         git \
+        nodejs \
+        npm \
+    && python -m pip install --no-cache-dir pytest \
     && addgroup -S sandbox \
     && adduser -S -G sandbox sandbox
 

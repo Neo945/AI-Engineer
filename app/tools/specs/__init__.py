@@ -16,15 +16,19 @@ from app.tools.specs.git import MODELS as _GIT_MODELS
 from app.tools.specs.git import SPECS as _GIT_SPECS
 from app.tools.specs.terminal import MODELS as _TERMINAL_MODELS
 from app.tools.specs.terminal import SPECS as _TERMINAL_SPECS
+from app.tools.specs.tests import MODELS as _TESTS_MODELS
+from app.tools.specs.tests import SPECS as _TESTS_SPECS
 
 ALL_SPECS: list[ToolSpec] = [
     *_FILESYSTEM_SPECS,
     *_TERMINAL_SPECS,
     *_GIT_SPECS,
+    *_TESTS_SPECS,
 ]
 
 ARGUMENT_MODELS: dict[ToolName, type[BaseModel]] = {
     **_FILESYSTEM_MODELS,
     **_TERMINAL_MODELS,
     **_GIT_MODELS,
+    **_TESTS_MODELS,
 }

@@ -29,6 +29,7 @@ class ToolName(StrEnum):
     FILE_DELETE = "file_delete"
     FILE_MOVE = "file_move"
     TERMINAL_RUN = "terminal_run"
+    TEST_RUN = "test_run"
     GIT_STATUS = "git_status"
     GIT_DIFF = "git_diff"
     GIT_COMMIT = "git_commit"
@@ -64,6 +65,8 @@ class ToolResult(BaseModel):
         exit_code: Process exit code for terminal/git tools, if any.
         duration_ms: Wall-clock time spent executing the tool.
         truncated: Whether ``output`` was cut off by a size limit.
+        data: Optional structured payload (e.g. a parsed test report) that
+            accompanies ``output`` for programmatic consumers.
     """
 
     call_id: str
@@ -74,6 +77,7 @@ class ToolResult(BaseModel):
     exit_code: int | None = None
     duration_ms: int | None = None
     truncated: bool = False
+    data: dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolSpec(BaseModel):
