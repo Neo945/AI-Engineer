@@ -6,6 +6,9 @@ pipeline, durable checkpoints, retries, cancellation, and streaming events.
 
 from __future__ import annotations
 
-from app.orchestrator.orchestrator import Orchestrator, OrchestratorEvent
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.orchestrator.orchestrator import Orchestrator, OrchestratorEvent
 
 __all__ = ["Orchestrator", "OrchestratorEvent"]

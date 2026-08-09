@@ -21,6 +21,7 @@ from rich.prompt import Confirm
 from rich.syntax import Syntax
 from rich.table import Table
 
+from app.agents.planning import TaskPlan, format_plan
 from app.cli.context import (
     CliContext,
     CliError,
@@ -181,8 +182,14 @@ async def cmd_run(
     state: WorkspaceState,
     goal: str,
     agent_type: str,
+    yes: bool = False,
 ) -> int:
-    """Run a goal through the orchestrator, streaming progress live."""
+    """Plan a goal, gate it on human approval, then run it, streaming live.
+
+    The planner produces a structured plan; if it writes files or touches
+    destructive operations the run pauses until the plan is approved.
+    ``yes`` approves automatically (non-interactive / scripted use).
+    """
     goal = goal.strip()
     if not goal:
         raise CliError("goal is empty")
@@ -203,6 +210,18 @@ async def cmd_run(
 
     ctx.console.print(f"[bold cyan]▶[/] {goal}  [dim]({agent_type})[/]")
     orchestrator = ctx.make_orchestrator()
+
+    planned = await _plan_task_streaming(ctx, orchestrator, task_id)
+    plan = TaskPlan.from_dict(planned.plan) if planned.plan is not None else None
+    if plan is not None:
+        ctx.console.print(Panel(format_plan(plan), title="plan", border_style="cyan"))
+    if plan is not None and plan.needs_approval:
+        if not yes and not Confirm.ask("Approve this plan and run the task?", default=False):
+            ctx.console.print(f"[yellow]aborted[/] task {task_id} awaits approval")
+            return 1
+        await orchestrator.approve_task(task_id)
+        ctx.console.print("[green]plan approved[/]")
+
     final = await _run_task_streaming(ctx, orchestrator, task_id)
     border = "green" if final.status == TaskStatus.COMPLETED else "red"
     ctx.console.print(
@@ -215,6 +234,42 @@ async def cmd_run(
         )
     )
     return 0 if final.status == TaskStatus.COMPLETED else 1
+
+
+async def _plan_task_streaming(
+    ctx: CliContext,
+    orchestrator: Orchestrator,
+    task_id: uuid.UUID,
+) -> Task:
+    """Run the planner while rendering its broker events as they arrive."""
+    container = ctx.container
+    if container is None:
+        return await orchestrator.plan_task(task_id)
+
+    queue = await container.event_broker.subscribe(task_id)
+
+    async def _render() -> None:
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=_STREAM_KEEPALIVE_SECONDS)
+                except TimeoutError:
+                    continue
+                render_event(ctx.console, event)
+                if event.kind == "planned":
+                    return
+        finally:
+            await container.event_broker.unsubscribe(task_id, queue)
+
+    render_task = asyncio.create_task(_render())
+    try:
+        result = await orchestrator.plan_task(task_id)
+    except BaseException:
+        render_task.cancel()
+        await asyncio.gather(render_task, return_exceptions=True)
+        raise
+    await render_task
+    return result
 
 
 async def _run_task_streaming(
@@ -394,6 +449,12 @@ def render_event(console: Console, event: OrchestratorEvent) -> None:
         console.print(f"[bold cyan]started[/] {event.detail or ''}")
     elif event.kind == "message":
         _render_message(console, event.message)
+    elif event.kind == "planned":
+        console.print("[bold cyan]planned[/]")
+    elif event.kind == "approved":
+        console.print("[bold green]plan approved[/]")
+    elif event.kind == "rejected":
+        console.print("[bold yellow]plan rejected[/]")
     elif event.kind == "completed":
         console.print("\n[bold green]completed[/]")
     elif event.kind == "failed":

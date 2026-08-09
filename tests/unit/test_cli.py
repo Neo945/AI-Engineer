@@ -85,6 +85,10 @@ def test_parser_run_defaults() -> None:
     assert args.command == "run"
     assert args.agent_type == "coder"
     assert args.goal == ["fix", "the", "test"]
+    assert args.yes is False
+
+    yes = parser.parse_args(["run", "-y", "go"])
+    assert yes.yes is True
 
     pipeline = parser.parse_args(["run", "--agent-type", "pipeline", "go"])
     assert pipeline.agent_type == "pipeline"
@@ -268,9 +272,30 @@ async def test_cmd_run_streams_events_with_stubbed_engine(tmp_path: Path) -> Non
             return self._session
 
     class FakeOrchestrator:
-        def __init__(self, broker: EventBroker, task_holder: list[Task]) -> None:
+        def __init__(
+            self,
+            broker: EventBroker,
+            task_holder: list[Task],
+            plan: dict[str, object] | None,
+        ) -> None:
             self._broker = broker
             self._task_holder = task_holder
+            self._plan = plan
+            self.approvals: list[uuid.UUID] = []
+
+        async def plan_task(self, task_id: uuid.UUID) -> Task:
+            task = self._task_holder[0]
+            task.plan = self._plan
+            await self._broker.publish(
+                OrchestratorEvent(task_id=task_id, kind="planned", detail="planner done")
+            )
+            return task
+
+        async def approve_task(self, task_id: uuid.UUID) -> Task:
+            self.approvals.append(task_id)
+            task = self._task_holder[0]
+            task.plan_approved = True
+            return task
 
         async def run_task(self, task_id: uuid.UUID) -> Task:
             task = self._task_holder[0]
@@ -280,10 +305,11 @@ async def test_cmd_run_streams_events_with_stubbed_engine(tmp_path: Path) -> Non
             )
             return task
 
+    read_only_plan: dict[str, object] = {"objective": "Read the README."}
     broker = EventBroker()
     session = FakeSession()
     container = FakeContainer(session, broker)
-    orchestrator = FakeOrchestrator(broker, holder)
+    orchestrator = FakeOrchestrator(broker, holder, read_only_plan)
     console, buffer = _console()
     ctx = CliContext(
         console=console,
@@ -299,6 +325,165 @@ async def test_cmd_run_streams_events_with_stubbed_engine(tmp_path: Path) -> Non
     assert len(session.added) == 1
     assert isinstance(session.added[0], Task)
     assert holder[0].status == TaskStatus.COMPLETED
+    assert orchestrator.approvals == []
     out = buffer.getvalue()
     assert "do the thing" in out
+    assert "planned" in out
+    assert "completed" in out
+    assert "Read the README." in out
+
+
+async def test_cmd_run_prompts_and_aborts_when_plan_declined(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _init_repo(tmp_path)
+    holder: list[Task] = []
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.added: list[Task] = []
+
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+        def add(self, entity: Task) -> None:
+            self.added.append(entity)
+            holder.append(entity)
+            if entity.id is None:
+                entity.id = uuid.uuid4()
+
+        async def flush(self) -> None:
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+    class FakeContainer:
+        def __init__(self, session: FakeSession, broker: EventBroker) -> None:
+            self._session = session
+            self.event_broker = broker
+
+        def session_factory(self) -> FakeSession:
+            return self._session
+
+    class FakeOrchestrator:
+        def __init__(self, broker: EventBroker, task_holder: list[Task]) -> None:
+            self._broker = broker
+            self._task_holder = task_holder
+            self.approvals: list[uuid.UUID] = []
+
+        async def plan_task(self, task_id: uuid.UUID) -> Task:
+            task = self._task_holder[0]
+            task.plan = {"objective": "Add auth.", "files": ["src/auth.py"]}
+            await self._broker.publish(
+                OrchestratorEvent(task_id=task_id, kind="planned", detail="planner done")
+            )
+            return task
+
+        async def approve_task(self, task_id: uuid.UUID) -> Task:
+            self.approvals.append(task_id)
+            return self._task_holder[0]
+
+        async def run_task(self, task_id: uuid.UUID) -> Task:
+            raise AssertionError("run must not start after a declined plan")
+
+    monkeypatch.setattr("app.cli.commands.Confirm.ask", lambda *a, **k: False)
+    broker = EventBroker()
+    session = FakeSession()
+    console, buffer = _console()
+    ctx = CliContext(
+        console=console,
+        settings=_settings(),
+        container=FakeContainer(session, broker),  # type: ignore[arg-type]
+        orchestrator=FakeOrchestrator(broker, holder),  # type: ignore[arg-type]
+    )
+    state = _state(repo)
+
+    code = await cmd_run(ctx, repo=repo, state=state, goal="add auth", agent_type="coder")
+
+    assert code == 1
+    assert "awaits approval" in buffer.getvalue()
+
+
+async def test_cmd_run_yes_approves_write_plan(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    holder: list[Task] = []
+    approvals: list[uuid.UUID] = []
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.added: list[Task] = []
+
+        async def __aenter__(self) -> FakeSession:
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+        def add(self, entity: Task) -> None:
+            self.added.append(entity)
+            holder.append(entity)
+            if entity.id is None:
+                entity.id = uuid.uuid4()
+
+        async def flush(self) -> None:
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+    class FakeContainer:
+        def __init__(self, session: FakeSession, broker: EventBroker) -> None:
+            self._session = session
+            self.event_broker = broker
+
+        def session_factory(self) -> FakeSession:
+            return self._session
+
+    class FakeOrchestrator:
+        def __init__(self, broker: EventBroker) -> None:
+            self._broker = broker
+
+        async def plan_task(self, task_id: uuid.UUID) -> Task:
+            task = holder[0]
+            task.plan = {"objective": "Add auth.", "files": ["src/auth.py"]}
+            await self._broker.publish(
+                OrchestratorEvent(task_id=task_id, kind="planned", detail="planner done")
+            )
+            return task
+
+        async def approve_task(self, task_id: uuid.UUID) -> Task:
+            approvals.append(task_id)
+            holder[0].plan_approved = True
+            return holder[0]
+
+        async def run_task(self, task_id: uuid.UUID) -> Task:
+            holder[0].status = TaskStatus.COMPLETED
+            await self._broker.publish(
+                OrchestratorEvent(task_id=task_id, kind="completed", detail="done")
+            )
+            return holder[0]
+
+    broker = EventBroker()
+    session = FakeSession()
+    console, buffer = _console()
+    ctx = CliContext(
+        console=console,
+        settings=_settings(),
+        container=FakeContainer(session, broker),  # type: ignore[arg-type]
+        orchestrator=FakeOrchestrator(broker),  # type: ignore[arg-type]
+    )
+    state = _state(repo)
+
+    code = await cmd_run(ctx, repo=repo, state=state, goal="add auth", agent_type="coder", yes=True)
+
+    assert code == 0
+    assert len(approvals) == 1
+    assert holder[0].status == TaskStatus.COMPLETED
+    out = buffer.getvalue()
+    assert "plan approved" in out
     assert "completed" in out

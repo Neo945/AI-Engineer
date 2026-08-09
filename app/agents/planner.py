@@ -32,7 +32,7 @@ _PLANNER_SYSTEM_PROMPT = (
     "- assumptions the plan relies on (one bullet each)\n"
     "## Files\n"
     "- every file the plan will create or modify (one bullet each); if the "
-    "task is read-only, write \"(none)\"\n"
+    'task is read-only, write "(none)"\n'
     "## Dependencies\n"
     "- packages, services, or prior work the plan depends on\n"
     "## Risks\n"

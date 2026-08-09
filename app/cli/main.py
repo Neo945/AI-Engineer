@@ -31,6 +31,7 @@ examples:
   engineer index                   index the workspace's source files
   engineer run fix the failing test
   engineer run --agent-type pipeline refactor the auth service
+  engineer run -y drop the migration (approve the plan automatically)
   engineer tasks --limit 20
   engineer diff HEAD~1
   engineer commit -m "fix: ..."
@@ -58,12 +59,18 @@ def build_parser() -> ArgumentParser:
     index = subparsers.add_parser("index", help="index the workspace's source files")
     index.set_defaults(handler=_cmd_index)
 
-    run = subparsers.add_parser("run", help="run a goal through the orchestrator")
+    run = subparsers.add_parser("run", help="plan a goal, then run it after approval")
     run.add_argument(
         "--agent-type",
         choices=("coder", "pipeline"),
         default="coder",
         help="which agent to run (default: coder)",
+    )
+    run.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="approve the plan without prompting",
     )
     run.add_argument("goal", nargs="+", help="the goal; quote it or use multiple words")
     run.set_defaults(handler=_cmd_run)
@@ -88,9 +95,7 @@ def build_parser() -> ArgumentParser:
     subparsers.add_parser("review", help="structured code review (skeleton)").set_defaults(
         handler=_cmd_review
     )
-    subparsers.add_parser("test", help="test execution (skeleton)").set_defaults(
-        handler=_cmd_test
-    )
+    subparsers.add_parser("test", help="test execution (skeleton)").set_defaults(handler=_cmd_test)
     return parser
 
 
@@ -130,6 +135,7 @@ async def _cmd_run(
         state=state,
         goal=" ".join(args.goal),
         agent_type=args.agent_type,
+        yes=args.yes,
     )
 
 
@@ -188,9 +194,7 @@ async def arun(argv: Sequence[str] | None, ctx: CliContext) -> int:
         repo = await find_repo_root(Path.cwd())
         state = None if args.command == "init" else load_state(repo)
         if state is None and args.command != "init":
-            raise CliError(
-                f"no binding for {repo} — run `engineer init` first"
-            )
+            raise CliError(f"no binding for {repo} — run `engineer init` first")
         return await args.handler(ctx, args, repo, state)
     except CliError as exc:
         ctx.console.print(f"[red]error[/] {exc}")

@@ -54,12 +54,21 @@ def _final_response(content: str) -> LLMResponse:
     )
 
 
+_PLAN_TEXT = """Objective: Fix the bug in the service.
+## Files
+- src/service.py
+## Steps
+1. Locate the faulty branch.
+2. Patch it.
+"""
+
+
 def _make_context(settings: Settings, container: Container) -> tuple[CliContext, StringIO]:
     buffer = StringIO()
     console = Console(file=buffer, width=200, highlight=False)
     orchestrator = Orchestrator(
         session_factory=container.session_factory,
-        llm=FakeLLM([_final_response("Fixed the bug.")]),
+        llm=FakeLLM([_final_response(_PLAN_TEXT), _final_response("Fixed the bug.")]),
         settings=container.settings,
         event_broker=container.event_broker,
         cancellations=container.cancellations,
@@ -108,9 +117,15 @@ async def test_cli_bind_status_run_tasks_lifecycle(
         buffer.truncate(0)
         buffer.seek(0)
         run_code = await commands.cmd_run(
-            ctx, repo=repo, state=state, goal="fix the bug", agent_type="coder"
+            ctx,
+            repo=repo,
+            state=state,
+            goal="fix the bug",
+            agent_type="coder",
+            yes=True,
         )
         assert run_code == 0
+        assert "plan approved" in buffer.getvalue()
 
         async with container.session_factory() as session:
             tasks = await TaskRepository(session).list_by_session(state.session_id)
@@ -119,6 +134,10 @@ async def test_cli_bind_status_run_tasks_lifecycle(
         assert done.status == TaskStatus.COMPLETED
         assert done.result == "Fixed the bug."
         assert done.agent_type == "coder"
+        assert done.plan is not None
+        assert done.plan["files"] == ["src/service.py"]
+        assert done.plan_needs_approval is True
+        assert done.plan_approved is True
 
         buffer.truncate(0)
         buffer.seek(0)

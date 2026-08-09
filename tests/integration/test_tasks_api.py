@@ -545,6 +545,118 @@ async def test_retry_task_not_found(
     assert response.json()["detail"] == "task not found"
 
 
+_PLAN_TEXT = """Objective: Add a reset password flow.
+## Files
+- src/auth/reset.py
+## Steps
+1. Add the reset token model.
+2. Wire the reset route.
+"""
+
+
+async def test_plan_approve_run_endpoint_completes(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    use_fake_llm: Callable[[LLMProvider], None],
+) -> None:
+    session_id = await _seed_session(db_session)
+    use_fake_llm(FakeLLM([_final_response(_PLAN_TEXT), _final_response("Fixed.")]))
+    task = await TaskRepository(db_session).add(
+        Task(session_id=session_id, agent_type="coder", goal="Add reset flow")
+    )
+    await db_session.commit()
+    task_id = task.id
+
+    planned = await client.post(f"/api/v1/tasks/{task_id}/plan")
+    assert planned.status_code == 202
+    body = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    for _ in range(50):
+        if body.get("plan") is not None:
+            break
+        await asyncio.sleep(0.05)
+        body = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert body["plan"] is not None
+    assert body["plan"]["files"] == ["src/auth/reset.py"]
+    assert body["plan_needs_approval"] is True
+    assert body["plan_approved"] is None
+
+    run_early = await client.post(f"/api/v1/tasks/{task_id}/run")
+    assert run_early.status_code == 409
+    assert "awaits approval" in run_early.json()["detail"]
+
+    approved = await client.post(f"/api/v1/tasks/{task_id}/approve")
+    assert approved.status_code == 200
+    assert approved.json()["plan_approved"] is True
+
+    run = await client.post(f"/api/v1/tasks/{task_id}/run")
+    assert run.status_code == 202
+
+    body = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    for _ in range(50):
+        if body["status"] in ("completed", "failed"):
+            break
+        await asyncio.sleep(0.05)
+        body = (await client.get(f"/api/v1/tasks/{task_id}")).json()
+    assert body["status"] == "completed"
+    assert body["result"] == "Fixed."
+    assert body["plan_approved"] is True
+
+
+async def test_reject_endpoint_blocks_run(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    use_fake_llm: Callable[[LLMProvider], None],
+) -> None:
+    session_id = await _seed_session(db_session)
+    use_fake_llm(FakeLLM([_final_response(_PLAN_TEXT)]))
+    task = await TaskRepository(db_session).add(
+        Task(session_id=session_id, agent_type="coder", goal="Add reset flow")
+    )
+    await db_session.commit()
+    task_id = task.id
+
+    await client.post(f"/api/v1/tasks/{task_id}/plan")
+    rejected = await client.post(f"/api/v1/tasks/{task_id}/reject")
+    assert rejected.status_code == 200
+    assert rejected.json()["plan_approved"] is False
+
+    run = await client.post(f"/api/v1/tasks/{task_id}/run")
+    assert run.status_code == 409
+    assert "rejected" in run.json()["detail"]
+
+
+async def test_approve_endpoint_requires_pending_plan(
+    client: AsyncClient,
+    db_session: AsyncSession,
+    use_fake_llm: Callable[[LLMProvider], None],
+) -> None:
+    use_fake_llm(FakeLLM())
+    session_id = await _seed_session(db_session)
+    task = await TaskRepository(db_session).add(
+        Task(session_id=session_id, agent_type="coder", goal="No plan yet")
+    )
+    await db_session.commit()
+
+    approved = await client.post(f"/api/v1/tasks/{task.id}/approve")
+    assert approved.status_code == 409
+    assert "no plan awaiting approval" in approved.json()["detail"]
+
+    rejected = await client.post(f"/api/v1/tasks/{task.id}/reject")
+    assert rejected.status_code == 409
+    assert "no plan awaiting approval" in rejected.json()["detail"]
+
+
+async def test_plan_approve_run_not_found(
+    client: AsyncClient,
+    use_fake_llm: Callable[[LLMProvider], None],
+) -> None:
+    use_fake_llm(FakeLLM())
+    for path in ("plan", "approve", "reject", "run"):
+        response = await client.post(f"/api/v1/tasks/{uuid.uuid4()}/{path}")
+        assert response.status_code == 404, path
+        assert response.json()["detail"] == "task not found"
+
+
 async def test_cancel_task_pending(
     client: AsyncClient,
     db_session: AsyncSession,

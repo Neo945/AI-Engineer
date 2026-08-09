@@ -86,8 +86,79 @@ async def create_and_run_task(
         )
     )
     await db.commit()
+    if task.plan_needs_approval and task.plan_approved is None:
+        raise HTTPException(status_code=409, detail="task plan awaits approval")
+    if task.plan_approved is False:
+        raise HTTPException(status_code=409, detail="task plan was rejected")
 
     background_tasks.add_task(orchestrator.run_task, task.id)
+    return task
+
+
+@router.post(
+    "/tasks/{task_id}/plan",
+    response_model=TaskResponse,
+    status_code=202,
+)
+async def plan_task(
+    task_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: SessionDep,
+    orchestrator: OrchestratorDep,
+) -> Task:
+    """Run the planner over a task in the background.
+
+    The planner persists the plan artifact and returns the task to ``pending``;
+    a plan that writes files or uses destructive operations then blocks
+    execution until it is approved via ``POST /tasks/{task_id}/approve`` (or
+    rejected via ``POST /tasks/{task_id}/reject``). Progress streams on the
+    task's SSE events endpoint.
+    """
+    task = await TaskRepository(db).get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    background_tasks.add_task(orchestrator.plan_task, task_id)
+    return task
+
+
+@router.post("/tasks/{task_id}/approve", response_model=TaskResponse)
+async def approve_task(
+    task_id: uuid.UUID,
+    db: SessionDep,
+    orchestrator: OrchestratorDep,
+) -> Task:
+    """Approve a task's plan so it may run."""
+    return await _decide_task(task_id, db, orchestrator, approve=True)
+
+
+@router.post("/tasks/{task_id}/reject", response_model=TaskResponse)
+async def reject_task(
+    task_id: uuid.UUID,
+    db: SessionDep,
+    orchestrator: OrchestratorDep,
+) -> Task:
+    """Reject a task's plan, blocking execution until it is re-planned."""
+    return await _decide_task(task_id, db, orchestrator, approve=False)
+
+
+async def _decide_task(
+    task_id: uuid.UUID,
+    db: SessionDep,
+    orchestrator: OrchestratorDep,
+    *,
+    approve: bool,
+) -> Task:
+    task = await TaskRepository(db).get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    try:
+        if approve:
+            await orchestrator.approve_task(task_id)
+        else:
+            await orchestrator.reject_task(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await db.refresh(task)
     return task
 
 
@@ -145,6 +216,34 @@ async def retry_task(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     background_tasks.add_task(orchestrator.run_task, task_id)
     await db.refresh(task)
+    return task
+
+
+@router.post(
+    "/tasks/{task_id}/run",
+    response_model=TaskResponse,
+    status_code=202,
+)
+async def run_task(
+    task_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: SessionDep,
+    orchestrator: OrchestratorDep,
+) -> Task:
+    """Schedule a task to run, usually after its plan is approved.
+
+    A task whose plan awaits approval (or was rejected) is refused with
+    ``409``. The run executes asynchronously; watch the task's SSE events
+    endpoint or poll ``GET /tasks/{task_id}``.
+    """
+    task = await TaskRepository(db).get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task.plan_needs_approval and task.plan_approved is None:
+        raise HTTPException(status_code=409, detail="task plan awaits approval")
+    if task.plan_approved is False:
+        raise HTTPException(status_code=409, detail="task plan was rejected")
+    background_tasks.add_task(orchestrator.run_task, task_id)
     return task
 
 

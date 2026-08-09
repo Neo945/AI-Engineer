@@ -50,11 +50,7 @@ def chunk_source(
     # Imports are recorded in chunks but never act as chunk boundaries, so a
     # file header stays one chunk instead of one per import.
     boundaries = sorted(
-        {
-            max(1, min(symbol.start_line, total))
-            for symbol in symbols
-            if symbol.kind != "import"
-        }
+        {max(1, min(symbol.start_line, total)) for symbol in symbols if symbol.kind != "import"}
     )
     cut_points = [1, *boundaries, total + 1]
     spans: list[tuple[int, int]] = []
@@ -66,17 +62,13 @@ def chunk_source(
 
     chunks: list[Chunk] = []
     for start, end in spans:
-        contained = tuple(
-            symbol for symbol in symbols if start <= symbol.start_line <= end
-        )
+        contained = tuple(symbol for symbol in symbols if start <= symbol.start_line <= end)
         # Drop short interstitial gaps (blank lines between declarations) but
         # never a file's only span: a symbol-less file must still be indexed.
         if end - start + 1 < min_lines and not contained and len(spans) > 1:
             continue
         content = "\n".join(lines[start - 1 : end])
-        chunks.append(
-            Chunk(start_line=start, end_line=end, content=content, symbols=contained)
-        )
+        chunks.append(Chunk(start_line=start, end_line=end, content=content, symbols=contained))
     return chunks
 
 

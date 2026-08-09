@@ -10,7 +10,7 @@ honouring dependency inversion.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -21,7 +21,9 @@ from app.database.session import create_session_factory
 from app.llm.factory import build_llm_client
 from app.orchestrator.broker import EventBroker
 from app.orchestrator.cancellation import CancellationRegistry
-from app.orchestrator.orchestrator import Orchestrator
+
+if TYPE_CHECKING:
+    from app.orchestrator.orchestrator import Orchestrator
 
 _DEFAULT_POOL_SIZE: Final = 10
 _DEFAULT_MAX_OVERFLOW: Final = 20
@@ -84,6 +86,8 @@ class Container:
         error only when a task is actually run.
         """
         if self._orchestrator is None:
+            from app.orchestrator.orchestrator import Orchestrator
+
             llm = build_llm_client(self.settings)
             self._orchestrator = Orchestrator(
                 session_factory=self.session_factory,
