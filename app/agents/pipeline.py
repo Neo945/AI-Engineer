@@ -24,6 +24,7 @@ from typing import Annotated, Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.base import DEFAULT_MAX_STEPS, LoopAgent
+from app.agents.repair import RepairAgent
 from app.executor.executor import ToolExecutor
 from app.llm.messages import ChatMessage, ChatRole
 from app.llm.protocol import LLMProvider
@@ -51,14 +52,6 @@ _REVIEWER_PROMPT = (
     "your turn with exactly one line first: 'VERDICT: PASS' if the work is "
     "acceptable, or 'VERDICT: CHANGES_NEEDED' followed by specific, "
     "actionable feedback the coder can implement."
-)
-
-_TESTER_PROMPT = (
-    "You are a test agent working inside a user's repository. Run the "
-    "project's tests with the terminal tool and verify the change works "
-    "end to end. End your turn with exactly one line first: 'VERDICT: PASS' "
-    "if the tests pass and the task is complete, or 'VERDICT: FAIL' followed "
-    "by the failing output and what the coder should fix."
 )
 
 _VERDICT = "PASS"
@@ -137,6 +130,10 @@ class PipelineAgent:
         executor: Executor for the workspace all stages work in.
         max_passes: Upper bound on rework round-trips before the pipeline
             terminates with the latest reviewer/tester verdict.
+        max_repairs: Upper bound on fix → re-run iterations in the tester's
+            test-and-repair loop.
+        test_command: Override for the test command the tester runs;
+            auto-detected from the workspace when ``None``.
         max_steps: Per-stage bound on LLM calls (each stage loop).
         max_tokens: Cap on generated tokens per LLM call.
         temperature: Sampling temperature.
@@ -152,6 +149,8 @@ class PipelineAgent:
         llm: LLMProvider,
         executor: ToolExecutor,
         max_passes: int = 2,
+        max_repairs: int = 2,
+        test_command: str | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         max_tokens: int = 4096,
         temperature: float = 0.0,
@@ -161,6 +160,8 @@ class PipelineAgent:
         self._llm = llm
         self._executor = executor
         self._max_passes = max_passes
+        self._max_repairs = max_repairs
+        self._test_command = test_command
         self._max_steps = max_steps
         self._max_tokens = max_tokens
         self._temperature = temperature
@@ -261,7 +262,7 @@ class PipelineAgent:
         }
 
     async def _tester(self, state: PipelineState) -> dict[str, Any]:
-        result = await self._run_stage(state, system_prompt=_TESTER_PROMPT)
+        result = await self._run_repair_stage(state)
         passed = parse_verdict(result.answer)
         return {
             "messages": result.delta,
@@ -308,6 +309,32 @@ class PipelineAgent:
             temperature=self._temperature,
             on_message=self._on_message,
             should_cancel=self._should_cancel,
+        )
+        previous = list(state.get("messages") or [])
+        result = await agent.run_from(previous)
+        return _StageResult(
+            answer=result.answer,
+            delta=result.messages[len(previous) :],
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            steps=result.steps,
+        )
+
+    async def _run_repair_stage(
+        self,
+        state: PipelineState,
+    ) -> _StageResult:
+        """Run the structured test-and-repair loop over the transcript."""
+        agent = RepairAgent(
+            llm=self._llm,
+            executor=self._executor,
+            max_repairs=self._max_repairs,
+            max_steps=self._max_steps,
+            max_tokens=self._max_tokens,
+            temperature=self._temperature,
+            on_message=self._on_message,
+            should_cancel=self._should_cancel,
+            test_command=self._test_command,
         )
         previous = list(state.get("messages") or [])
         result = await agent.run_from(previous)

@@ -10,6 +10,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -47,6 +48,7 @@ class _StubRegistry:
 
 class _StubExecutor:
     def __init__(self) -> None:
+        self.workspace_dir = Path("/workspace")
         self.calls: list[ToolCall] = []
         self.registry = _StubRegistry(
             [
@@ -248,7 +250,6 @@ async def test_create_and_run_pipeline_task(
                 _final_response("Plan: 1. Inspect. 2. Fix."),
                 _final_response("Fixed the bug."),
                 _final_response("VERDICT: PASS\nLooks good."),
-                _final_response("VERDICT: PASS\nTests green."),
             ]
         )
     )
@@ -265,9 +266,9 @@ async def test_create_and_run_pipeline_task(
     assert detail.status_code == 200
     body = detail.json()
     assert body["status"] == "completed"
-    assert body["result"] == "VERDICT: PASS\nTests green."
-    assert body["input_tokens"] == 20
-    assert body["output_tokens"] == 8
+    assert body["result"].startswith("VERDICT: PASS\nTest run: pytest")
+    assert body["input_tokens"] == 15
+    assert body["output_tokens"] == 6
     assert [m["role"] for m in body["messages"]] == [
         "user",
         "assistant",
@@ -275,13 +276,13 @@ async def test_create_and_run_pipeline_task(
         "assistant",
         "assistant",
     ]
-    assert [m["content"] for m in body["messages"]] == [
+    assert [m["content"] for m in body["messages"][:4]] == [
         "Fix the bug",
         "Plan: 1. Inspect. 2. Fix.",
         "Fixed the bug.",
         "VERDICT: PASS\nLooks good.",
-        "VERDICT: PASS\nTests green.",
     ]
+    assert body["messages"][4]["content"].startswith("VERDICT: PASS\nTest run: pytest")
     assert [m["ordinal"] for m in body["messages"]] == [0, 1, 2, 3, 4]
 
 

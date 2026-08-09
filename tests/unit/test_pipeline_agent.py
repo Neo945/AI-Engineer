@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import deque
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -24,7 +26,9 @@ class _StubRegistry:
 
 
 class _StubExecutor:
-    def __init__(self) -> None:
+    def __init__(self, test_results: list[bool] | None = None) -> None:
+        self.workspace_dir = Path("/workspace")
+        self._test_results = deque(test_results or [True])
         self.calls: list[ToolCall] = []
         self.registry = _StubRegistry(
             [
@@ -41,7 +45,8 @@ class _StubExecutor:
 
     async def execute(self, call: ToolCall) -> ToolResult:
         self.calls.append(call)
-        return ToolResult(call_id=call.id, tool=call.tool, ok=True, output="42")
+        ok = self._test_results.popleft() if self._test_results else True
+        return ToolResult(call_id=call.id, tool=call.tool, ok=ok, output="42")
 
 
 def _final_response(content: str, *, input_tokens: int = 5, output_tokens: int = 2) -> LLMResponse:
@@ -54,7 +59,7 @@ def _final_response(content: str, *, input_tokens: int = 5, output_tokens: int =
 
 
 def _pipeline(script: list[LLMResponse], **kwargs: Any) -> PipelineAgent:
-    executor = cast(ToolExecutor, _StubExecutor())
+    executor = cast(ToolExecutor, _StubExecutor(kwargs.pop("test_results", None)))
     return PipelineAgent(llm=FakeLLM(script), executor=executor, **kwargs)
 
 
@@ -73,17 +78,16 @@ async def test_pipeline_happy_path() -> None:
         _final_response("Plan: 1. Inspect. 2. Fix."),
         _final_response("Fixed the bug."),
         _final_response("VERDICT: PASS\nLooks good."),
-        _final_response("VERDICT: PASS\nTests green."),
     ]
     agent = _pipeline(script)
 
     result = await agent.run("Fix the bug")
 
     assert result.passes == 0
-    assert result.answer == "VERDICT: PASS\nTests green."
-    assert result.input_tokens == 20
-    assert result.output_tokens == 8
-    assert result.steps == 4
+    assert result.answer.startswith("VERDICT: PASS")
+    assert result.input_tokens == 15
+    assert result.output_tokens == 6
+    assert result.steps == 3
     assert [message.role for message in result.messages] == [
         ChatRole.USER,
         ChatRole.ASSISTANT,
@@ -91,13 +95,13 @@ async def test_pipeline_happy_path() -> None:
         ChatRole.ASSISTANT,
         ChatRole.ASSISTANT,
     ]
-    assert [message.content for message in result.messages] == [
+    assert [message.content for message in result.messages[:4]] == [
         "Fix the bug",
         "Plan: 1. Inspect. 2. Fix.",
         "Fixed the bug.",
         "VERDICT: PASS\nLooks good.",
-        "VERDICT: PASS\nTests green.",
     ]
+    assert result.messages[4].content.startswith("VERDICT: PASS\nTest run: pytest")
 
 
 async def test_pipeline_feeds_accumulated_transcript_to_each_stage() -> None:
@@ -105,17 +109,18 @@ async def test_pipeline_feeds_accumulated_transcript_to_each_stage() -> None:
         _final_response("Plan."),
         _final_response("Fix."),
         _final_response("VERDICT: PASS"),
-        _final_response("VERDICT: PASS"),
+        _final_response("Fixed it."),
     ]
-    executor = cast(ToolExecutor, _StubExecutor())
+    executor = cast(ToolExecutor, _StubExecutor(test_results=[False, True]))
     fake = FakeLLM(script)
     agent = PipelineAgent(llm=fake, executor=executor)
 
     await agent.run("Goal")
 
-    # Each stage sees the running conversation grow: planner [goal],
-    # coder [goal+plan], reviewer [..+coder], tester [..+reviewer].
-    assert [len(call["messages"]) for call in fake.calls] == [1, 2, 3, 4]
+    # Planner [goal], coder [goal+plan], reviewer [..+coder]; the tester's
+    # first run fails so its repair turn sees the grown transcript plus the
+    # failure report appended by the repair loop.
+    assert [len(call["messages"]) for call in fake.calls] == [1, 2, 3, 5]
     assert all(call["system"] is not None for call in fake.calls)
     assert fake.calls[3]["messages"][1].content == "Plan."
 
@@ -127,14 +132,13 @@ async def test_pipeline_routes_back_to_coder_on_changes_needed() -> None:
         _final_response("VERDICT: CHANGES_NEEDED\nAdd tests."),
         _final_response("Fix v2."),
         _final_response("VERDICT: PASS\nNow it is complete."),
-        _final_response("VERDICT: PASS\nTests green."),
     ]
     agent = _pipeline(script)
 
     result = await agent.run("Goal")
 
     assert result.passes == 1
-    assert result.answer == "VERDICT: PASS\nTests green."
+    assert result.answer.startswith("VERDICT: PASS")
     assert len(result.messages) == 7  # goal + plan + 2x(coder+reviewer) + tester
     assert result.messages[3].content == "VERDICT: CHANGES_NEEDED\nAdd tests."
     assert result.messages[4].content == "Fix v2."
@@ -145,18 +149,16 @@ async def test_pipeline_routes_back_to_coder_on_failed_tests() -> None:
         _final_response("Plan."),
         _final_response("Fix."),
         _final_response("VERDICT: PASS"),
-        _final_response("VERDICT: FAIL\nRed."),
         _final_response("Fix again."),
         _final_response("VERDICT: PASS"),
-        _final_response("VERDICT: PASS"),
     ]
-    agent = _pipeline(script)
+    agent = _pipeline(script, max_repairs=0, test_results=[False, True])
 
     result = await agent.run("Goal")
 
     assert result.passes == 1
-    assert result.answer == "VERDICT: PASS"
-    # goal + plan + coder + review + tester + coder + review + tester
+    assert result.answer.startswith("VERDICT: PASS")
+    # goal + plan + coder + review + tester(fail) + coder + review + tester(pass)
     assert len(result.messages) == 8
 
 
@@ -199,7 +201,6 @@ async def test_pipeline_streams_messages_in_transcript_order() -> None:
     script = [
         _final_response("Plan."),
         _final_response("Fix."),
-        _final_response("VERDICT: PASS"),
         _final_response("VERDICT: PASS"),
     ]
     streamed: list[ChatMessage] = []

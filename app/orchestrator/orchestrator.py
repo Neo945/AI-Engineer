@@ -140,6 +140,8 @@ class Orchestrator:
                 on_message=on_message,
                 should_cancel=should_cancel,
                 max_passes=self._settings.pipeline_max_passes,
+                max_repairs=self._settings.test_max_repairs,
+                test_command=self._settings.test_command,
             )
         if task.agent_type == "coder":
             return CoderAgent(

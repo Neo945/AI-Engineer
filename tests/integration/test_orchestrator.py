@@ -46,6 +46,7 @@ class _StubRegistry:
 
 class _StubExecutor:
     def __init__(self) -> None:
+        self.workspace_dir = Path("/workspace")
         self.calls: list[ToolCall] = []
         self.registry = _StubRegistry(
             [
@@ -555,7 +556,6 @@ async def test_run_task_runs_multi_agent_pipeline(
             _final_response("Plan: 1. Inspect. 2. Fix."),
             _final_response("Fixed the bug."),
             _final_response("VERDICT: PASS\nLooks good."),
-            _final_response("VERDICT: PASS\nTests green."),
         ]
     )
     events: list[OrchestratorEvent] = []
@@ -568,10 +568,10 @@ async def test_run_task_runs_multi_agent_pipeline(
         persisted = await MessageRepository(fresh).list_by_session(task.session_id)
     assert done is not None
     assert done.status == TaskStatus.COMPLETED
-    assert done.result == "VERDICT: PASS\nTests green."
+    assert done.result.startswith("VERDICT: PASS\nTest run: pytest")
     assert done.error is None
-    assert done.input_tokens == 20
-    assert done.output_tokens == 8
+    assert done.input_tokens == 15
+    assert done.output_tokens == 6
     assert done.attempt == 1
     assert [message.role for message in persisted] == [
         MessageRole.USER,
@@ -580,13 +580,13 @@ async def test_run_task_runs_multi_agent_pipeline(
         MessageRole.ASSISTANT,
         MessageRole.ASSISTANT,
     ]
-    assert [message.content for message in persisted] == [
+    assert [message.content for message in persisted[:4]] == [
         "Fix the bug",
         "Plan: 1. Inspect. 2. Fix.",
         "Fixed the bug.",
         "VERDICT: PASS\nLooks good.",
-        "VERDICT: PASS\nTests green.",
     ]
+    assert persisted[4].content.startswith("VERDICT: PASS\nTest run: pytest")
     assert [event.kind for event in events] == [
         "started",
         "message",
@@ -596,7 +596,7 @@ async def test_run_task_runs_multi_agent_pipeline(
         "message",
         "completed",
     ]
-    assert events[-1].detail == "VERDICT: PASS\nTests green."
+    assert events[-1].detail.startswith("VERDICT: PASS\nTest run: pytest")
 
 
 async def test_run_task_fails_unsupported_agent_type(
