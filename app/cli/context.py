@@ -30,6 +30,7 @@ from app.orchestrator.orchestrator import Orchestrator
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from app.agents.base import TokenHandler
     from app.orchestrator.orchestrator import TaskEventHandler
 
 STATE_DIR_NAME = ".engineer"
@@ -155,6 +156,8 @@ class CliContext:
         self,
         *,
         on_event: TaskEventHandler | None = None,
+        on_token: TokenHandler | None = None,
+        stream: bool = False,
     ) -> Orchestrator:
         """Return an orchestrator for running a task.
 
@@ -179,6 +182,8 @@ class CliContext:
             event_broker=container.event_broker,
             cancellations=container.cancellations,
             on_event=on_event,
+            on_token=on_token,
+            stream=stream,
         )
 
     async def aclose(self) -> None:

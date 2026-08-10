@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
-from app.agents.base import DEFAULT_MAX_STEPS, LoopAgent
+from app.agents.base import DEFAULT_MAX_STEPS, LoopAgent, TokenHandler
 from app.executor.executor import ToolExecutor, _detect_test_command
 from app.executor.test_parser import TestReport, format_report
 from app.llm.messages import ChatMessage, ChatRole
@@ -66,6 +66,11 @@ class RepairAgent:
         temperature: Sampling temperature.
         on_message: Optional callback invoked with every produced message in
             transcript order, as it is produced.
+        on_token: Optional callback invoked with incremental text deltas
+            while the model generates (when ``stream`` is enabled).
+        stream: When ``True``, generate via the provider's ``stream()`` and
+            forward deltas to ``on_token``; falls back to ``complete()``
+            when streaming is unavailable.
         should_cancel: Optional predicate checked at each repair's step
             boundaries; when ``True`` the run raises :class:`TaskCancelled`.
         test_command: Override for the test command; auto-detected when
@@ -84,6 +89,8 @@ class RepairAgent:
         max_tokens: int = 4096,
         temperature: float = 0.0,
         on_message: Callable[[ChatMessage], Awaitable[None] | None] | None = None,
+        on_token: TokenHandler | None = None,
+        stream: bool = False,
         should_cancel: Callable[[], bool] | None = None,
         test_command: str | None = None,
         test_framework: str | None = None,
@@ -95,6 +102,8 @@ class RepairAgent:
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._on_message = on_message
+        self._on_token = on_token
+        self._stream = stream
         self._should_cancel = should_cancel
         self._test_command = test_command
         self._test_framework = test_framework
@@ -137,6 +146,8 @@ class RepairAgent:
             max_tokens=self._max_tokens,
             temperature=self._temperature,
             on_message=self._on_message,
+            on_token=self._on_token,
+            stream=self._stream,
             should_cancel=self._should_cancel,
         )
 

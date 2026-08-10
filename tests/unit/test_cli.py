@@ -662,6 +662,38 @@ async def test_cmd_review_changes_needed_exits_one(tmp_path: Path) -> None:
     assert "CHANGES_NEEDED" in buffer.getvalue()
 
 
+async def test_cmd_review_streams_tokens_live(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    llm = FakeLLM([_response("VERDICT: PASS\nNo issues.")])
+
+    code = await cmd_review(ctx, repo=repo, state=None, llm=llm, executor=_StubExecutor(repo))
+
+    out = buffer.getvalue()
+    assert code == 0
+    assert "◆ VERDICT: PASS\nNo issues." in out
+    assert out.count("VERDICT: PASS") == 1
+
+
+def test_render_event_does_not_repeat_streamed_content() -> None:
+    from app.cli.commands import _TokenSink
+
+    console, buffer = _console()
+    sink = _TokenSink(console)
+    sink.feed("streamed verdict")
+    event = OrchestratorEvent(
+        task_id=uuid.uuid4(),
+        kind="message",
+        message=ChatMessage(role=ChatRole.ASSISTANT, content="streamed verdict"),
+    )
+    render_event(console, event, sink)
+
+    out = buffer.getvalue()
+    assert out.count("streamed verdict") == 1
+    assert out.endswith("\n")
+
+
 async def test_cmd_test_fix_unconfigured_llm_is_friendly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

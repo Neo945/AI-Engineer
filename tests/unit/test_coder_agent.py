@@ -54,6 +54,14 @@ class _StubExecutor:
         )
 
 
+class _NoStream(FakeLLM):
+    """A provider whose stream() raises, forcing the complete() fallback."""
+
+    async def stream(self, *args, **kwargs):
+        raise RuntimeError("streaming unsupported")
+        yield  # pragma: no cover - unreachable; marks the method as a generator
+
+
 def _tool_response(
     *,
     content: str = "",
@@ -278,6 +286,71 @@ async def test_agent_streams_unknown_tool_message() -> None:
     tool_message = streamed[2]
     assert tool_message.role == ChatRole.TOOL
     assert "unknown tool" in tool_message.content
+
+
+async def test_agent_streams_tokens_to_on_token_hook() -> None:
+    executor = cast(ToolExecutor, _StubExecutor())
+    fake = FakeLLM([_final_response("Fixed the bug.")])
+    tokens: list[str] = []
+    agent = CoderAgent(
+        llm=fake,
+        executor=executor,
+        stream=True,
+        on_token=lambda text: tokens.append(text),
+    )
+    result = await agent.run("Fix it")
+
+    assert "".join(tokens) == "Fixed the bug."
+    assert result.answer == "Fixed the bug."
+    assert result.input_tokens == 5
+    assert result.output_tokens == 2
+
+
+async def test_agent_streams_tokens_across_tool_turn() -> None:
+    stub = _StubExecutor()
+    executor = cast(ToolExecutor, stub)
+    request = ToolRequest(name="file_read", arguments={"path": "x.py"})
+    fake = FakeLLM(
+        [
+            _tool_response(requests=[request]),
+            _final_response("Read x.py: done."),
+        ]
+    )
+    tokens: list[str] = []
+    agent = CoderAgent(
+        llm=fake,
+        executor=executor,
+        stream=True,
+        on_token=lambda text: tokens.append(text),
+    )
+    result = await agent.run("Fix the bug")
+
+    assert "".join(tokens) == "Read x.py: done."
+    assert result.answer == "Read x.py: done."
+    assert [call.tool for call in stub.calls] == [ToolName.FILE_READ]
+    assert [message.role for message in result.messages] == [
+        ChatRole.USER,
+        ChatRole.ASSISTANT,
+        ChatRole.TOOL,
+        ChatRole.ASSISTANT,
+    ]
+
+
+async def test_agent_falls_back_to_complete_when_streaming_unavailable() -> None:
+    executor = cast(ToolExecutor, _StubExecutor())
+    fake = _NoStream([_final_response("Done via fallback.")])
+    tokens: list[str] = []
+    agent = CoderAgent(
+        llm=fake,
+        executor=executor,
+        stream=True,
+        on_token=lambda text: tokens.append(text),
+    )
+    result = await agent.run("Do it")
+
+    assert result.answer == "Done via fallback."
+    assert "".join(tokens) == "Done via fallback."
+    assert len(fake.calls) == 1
 
 
 async def test_agent_raises_task_cancelled_when_hook_requests_cancel() -> None:

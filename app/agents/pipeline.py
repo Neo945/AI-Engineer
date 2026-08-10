@@ -23,7 +23,7 @@ from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from app.agents.base import DEFAULT_MAX_STEPS, LoopAgent
+from app.agents.base import DEFAULT_MAX_STEPS, LoopAgent, TokenHandler
 from app.agents.repair import RepairAgent
 from app.executor.executor import ToolExecutor
 from app.llm.messages import ChatMessage, ChatRole
@@ -139,6 +139,11 @@ class PipelineAgent:
         temperature: Sampling temperature.
         on_message: Optional callback invoked with every produced message in
             transcript order, as it is produced (shared across stages).
+        on_token: Optional callback invoked with incremental text deltas
+            while a stage generates (when ``stream`` is enabled).
+        stream: When ``True``, stages generate via the provider's
+            ``stream()`` and forward deltas to ``on_token``; falls back to
+            ``complete()`` when streaming is unavailable.
         should_cancel: Optional predicate checked at each stage's step
             boundaries; when ``True`` the run raises :class:`TaskCancelled`.
     """
@@ -155,6 +160,8 @@ class PipelineAgent:
         max_tokens: int = 4096,
         temperature: float = 0.0,
         on_message: Callable[[ChatMessage], Awaitable[None] | None] | None = None,
+        on_token: TokenHandler | None = None,
+        stream: bool = False,
         should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         self._llm = llm
@@ -166,6 +173,8 @@ class PipelineAgent:
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._on_message = on_message
+        self._on_token = on_token
+        self._stream = stream
         self._should_cancel = should_cancel
         self._graph = self._build_graph()
 
@@ -308,6 +317,8 @@ class PipelineAgent:
             max_tokens=self._max_tokens,
             temperature=self._temperature,
             on_message=self._on_message,
+            on_token=self._on_token,
+            stream=self._stream,
             should_cancel=self._should_cancel,
         )
         previous = list(state.get("messages") or [])
@@ -333,6 +344,8 @@ class PipelineAgent:
             max_tokens=self._max_tokens,
             temperature=self._temperature,
             on_message=self._on_message,
+            on_token=self._on_token,
+            stream=self._stream,
             should_cancel=self._should_cancel,
             test_command=self._test_command,
         )

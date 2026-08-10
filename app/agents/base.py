@@ -20,11 +20,13 @@ from langgraph.graph import END, START, StateGraph
 
 from app.executor.executor import ToolExecutor
 from app.llm.messages import ChatMessage, ChatRole, ToolRequest
-from app.llm.protocol import LLMProvider
+from app.llm.protocol import LLMProvider, LLMResponse, LLMUsage
 from app.orchestrator.cancellation import TaskCancelled
 from app.tools.schemas import ToolCall, ToolName, ToolResult
 
 DEFAULT_MAX_STEPS = 8
+
+TokenHandler = Callable[[str], Awaitable[None] | None]
 
 
 class RunResult(Protocol):
@@ -96,6 +98,13 @@ class LoopAgent:
         on_message: Optional callback invoked with every produced message
             (each assistant turn and each tool result) in transcript order,
             as it is produced.
+        on_token: Optional callback invoked with each incremental text
+            delta while the model is generating (only when ``stream`` is
+            enabled); used to render live output.
+        stream: When ``True``, generate via the provider's ``stream()`` and
+            forward text deltas to ``on_token``. Streaming failures fall back
+            to a single ``complete()`` call so a provider that cannot stream
+            still works.
         should_cancel: Optional predicate checked at each step boundary;
             when it returns ``True`` the run raises :class:`TaskCancelled`
             and stops at the next safe point (cooperative cancellation).
@@ -111,6 +120,8 @@ class LoopAgent:
         max_tokens: int = 4096,
         temperature: float = 0.0,
         on_message: Callable[[ChatMessage], Awaitable[None] | None] | None = None,
+        on_token: TokenHandler | None = None,
+        stream: bool = False,
         should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         self._llm = llm
@@ -120,6 +131,8 @@ class LoopAgent:
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._on_message = on_message
+        self._on_token = on_token
+        self._stream = stream
         self._should_cancel = should_cancel
         self._graph = self._build_graph()
 
@@ -197,13 +210,7 @@ class LoopAgent:
     async def _step(self, state: LoopState) -> dict[str, Any]:
         if self._should_cancel is not None and self._should_cancel():
             raise TaskCancelled()
-        response = await self._llm.complete(
-            state.get("messages") or [],
-            tools=self._executor.registry.specs(),
-            system=self._system_prompt,
-            max_tokens=self._max_tokens,
-            temperature=self._temperature,
-        )
+        response = await self._complete(state.get("messages") or [])
         if response.tool_requests:
             assistant = ChatMessage(
                 role=ChatRole.ASSISTANT,
@@ -232,6 +239,73 @@ class LoopAgent:
             "output_tokens": response.usage.output_tokens,
         }
 
+    async def _complete(self, messages: Sequence[ChatMessage]) -> LLMResponse:
+        """Call the LLM, streaming tokens when ``stream`` is enabled.
+
+        A streaming failure falls back to a single ``complete()`` call so the
+        loop still produces a response for providers that cannot stream; the
+        recovered text is emitted through ``on_token`` so live renderers stay
+        complete.
+        """
+        if not self._stream:
+            return await self._llm.complete(
+                messages,
+                tools=self._executor.registry.specs(),
+                system=self._system_prompt,
+                max_tokens=self._max_tokens,
+                temperature=self._temperature,
+            )
+        try:
+            return await self._stream_complete(messages)
+        except TaskCancelled:
+            raise
+        except Exception:
+            response = await self._llm.complete(
+                messages,
+                tools=self._executor.registry.specs(),
+                system=self._system_prompt,
+                max_tokens=self._max_tokens,
+                temperature=self._temperature,
+            )
+            if response.content:
+                await self._invoke_on_token(response.content)
+            return response
+
+    async def _stream_complete(self, messages: Sequence[ChatMessage]) -> LLMResponse:
+        """Consume the provider's stream into a single :class:`LLMResponse`.
+
+        Text deltas are forwarded to ``on_token`` as they arrive; tool
+        requests and usage are collected from the corresponding stream
+        events so the assembled response matches the non-streamed path.
+        """
+        parts: list[str] = []
+        requests: list[ToolRequest] = []
+        usage = LLMUsage()
+        model_name = self._llm.model
+        async for event in self._llm.stream(
+            messages,
+            tools=self._executor.registry.specs(),
+            system=self._system_prompt,
+            max_tokens=self._max_tokens,
+            temperature=self._temperature,
+        ):
+            if event.type == "text":
+                parts.append(event.text)
+                await self._invoke_on_token(event.text)
+            elif event.type == "tool_request" and event.tool_request is not None:
+                requests.append(event.tool_request)
+            elif event.type == "usage":
+                if event.usage is not None:
+                    usage = event.usage
+                model_name = event.model or model_name
+        return LLMResponse(
+            content="".join(parts),
+            tool_requests=requests,
+            stop_reason="end_turn",
+            usage=usage,
+            model=model_name,
+        )
+
     async def _execute_tool(self, request: ToolRequest) -> ChatMessage:
         try:
             tool = ToolName(request.name)
@@ -258,6 +332,13 @@ class LoopAgent:
         if self._on_message is None:
             return
         result = self._on_message(message)
+        if result is not None:
+            await result
+
+    async def _invoke_on_token(self, text: str) -> None:
+        if self._on_token is None:
+            return
+        result = self._on_token(text)
         if result is not None:
             await result
 

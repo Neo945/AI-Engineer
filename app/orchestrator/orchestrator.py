@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.agents.base import AgentLike
+from app.agents.base import AgentLike, TokenHandler
 from app.agents.coder import CoderAgent
 from app.agents.pipeline import PipelineAgent
 from app.agents.planner import PlannerAgent
@@ -102,6 +102,8 @@ class Orchestrator:
         llm: LLMProvider,
         settings: Settings,
         on_event: TaskEventHandler | None = None,
+        on_token: TokenHandler | None = None,
+        stream: bool = False,
         event_broker: EventBroker | None = None,
         cancellations: CancellationRegistry | None = None,
         executor_factory: ExecutorFactory | None = None,
@@ -110,6 +112,8 @@ class Orchestrator:
         self._llm = llm
         self._settings = settings
         self._on_event = on_event
+        self._on_token = on_token
+        self._stream = stream
         self._event_broker = event_broker
         self._cancellations = cancellations
         self._executor_factory = executor_factory or self._default_executor
@@ -138,6 +142,8 @@ class Orchestrator:
                 max_tokens=self._settings.llm_max_tokens,
                 temperature=self._settings.llm_temperature,
                 on_message=on_message,
+                on_token=self._on_token,
+                stream=self._stream,
                 should_cancel=should_cancel,
                 max_passes=self._settings.pipeline_max_passes,
                 max_repairs=self._settings.test_max_repairs,
@@ -150,6 +156,8 @@ class Orchestrator:
                 max_tokens=self._settings.llm_max_tokens,
                 temperature=self._settings.llm_temperature,
                 on_message=on_message,
+                on_token=self._on_token,
+                stream=self._stream,
                 should_cancel=should_cancel,
             )
         raise ValueError(f"unsupported agent_type: {task.agent_type}")
@@ -262,6 +270,8 @@ class Orchestrator:
                     max_tokens=self._settings.llm_max_tokens,
                     temperature=self._settings.llm_temperature,
                     on_message=append,
+                    on_token=self._on_token,
+                    stream=self._stream,
                     should_cancel=self._cancel_checked(task.id),
                 )
                 initial_messages = await self._assemble_context(session, task)

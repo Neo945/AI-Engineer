@@ -12,7 +12,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
-from app.agents.base import DEFAULT_MAX_STEPS, LoopAgent
+from app.agents.base import (
+    DEFAULT_MAX_STEPS,
+    LoopAgent,
+    TokenHandler,
+)
 from app.agents.planning import TaskPlan, format_plan, parse_plan
 from app.executor.executor import ToolExecutor
 from app.llm.messages import ChatMessage
@@ -76,6 +80,11 @@ class PlannerAgent(LoopAgent):
         temperature: Sampling temperature.
         on_message: Optional callback invoked with every produced message in
             transcript order.
+        on_token: Optional callback invoked with incremental text deltas
+            while the model generates (when ``stream`` is enabled).
+        stream: When ``True``, generate via the provider's ``stream()`` and
+            forward deltas to ``on_token``; falls back to ``complete()``
+            when streaming is unavailable.
         should_cancel: Optional cooperative-cancellation predicate checked at
             each step boundary.
     """
@@ -89,6 +98,8 @@ class PlannerAgent(LoopAgent):
         max_tokens: int = 4096,
         temperature: float = 0.0,
         on_message: Callable[[ChatMessage], Awaitable[None] | None] | None = None,
+        on_token: TokenHandler | None = None,
+        stream: bool = False,
         should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(
@@ -99,6 +110,8 @@ class PlannerAgent(LoopAgent):
             max_tokens=max_tokens,
             temperature=temperature,
             on_message=on_message,
+            on_token=on_token,
+            stream=stream,
             should_cancel=should_cancel,
         )
 

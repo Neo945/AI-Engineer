@@ -12,7 +12,13 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
-from app.agents.base import DEFAULT_MAX_STEPS, LoopAgent, LoopResult, format_tool_result
+from app.agents.base import (
+    DEFAULT_MAX_STEPS,
+    LoopAgent,
+    LoopResult,
+    TokenHandler,
+    format_tool_result,
+)
 from app.executor.executor import ToolExecutor
 from app.llm.messages import ChatMessage
 from app.llm.protocol import LLMProvider
@@ -43,6 +49,11 @@ class CoderAgent(LoopAgent):
         on_message: Optional callback invoked with every produced message
             (the goal, each assistant turn, and each tool result) in
             transcript order, as it is produced.
+        on_token: Optional callback invoked with incremental text deltas
+            while the model generates (when ``stream`` is enabled).
+        stream: When ``True``, generate via the provider's ``stream()`` and
+            forward deltas to ``on_token``; falls back to ``complete()``
+            when streaming is unavailable.
         should_cancel: Optional predicate checked at each step boundary;
             when it returns ``True`` the run raises :class:`TaskCancelled`
             and stops at the next safe point (cooperative cancellation).
@@ -58,6 +69,8 @@ class CoderAgent(LoopAgent):
         max_tokens: int = 4096,
         temperature: float = 0.0,
         on_message: Callable[[ChatMessage], Awaitable[None] | None] | None = None,
+        on_token: TokenHandler | None = None,
+        stream: bool = False,
         should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(
@@ -68,5 +81,7 @@ class CoderAgent(LoopAgent):
             max_tokens=max_tokens,
             temperature=temperature,
             on_message=on_message,
+            on_token=on_token,
+            stream=stream,
             should_cancel=should_cancel,
         )

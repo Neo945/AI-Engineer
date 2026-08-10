@@ -118,6 +118,35 @@ def _verdict_passed(answer: str) -> bool:
     return _final_verdict(answer) == "PASS"
 
 
+class _TokenSink:
+    """Render streamed tokens live, closing the line on the next event.
+
+    The first delta of an assistant turn prints a ``◆`` prefix; subsequent
+    deltas append without newlines so the console fills in as the model
+    generates. ``finish`` returns whether a turn was active so callers can
+    avoid re-printing content that was already streamed.
+    """
+
+    def __init__(self, console: Console) -> None:
+        self._console = console
+        self._active = False
+
+    def feed(self, text: str) -> None:
+        if not text:
+            return
+        if not self._active:
+            self._console.print("[green]◆[/] ", end="")
+            self._active = True
+        self._console.print(text, end="")
+
+    def finish(self) -> bool:
+        active = self._active
+        if active:
+            self._console.print()
+            self._active = False
+        return active
+
+
 async def cmd_init(ctx: CliContext, *, repo: Path, name: str | None) -> int:
     """Bind a git repository to a workspace + session and persist state."""
     repo = Path(os.path.realpath(repo))
@@ -255,9 +284,13 @@ async def cmd_run(
         task_id = task.id
 
     ctx.console.print(f"[bold cyan]▶[/] {goal}  [dim]({agent_type})[/]")
-    orchestrator = ctx.make_orchestrator()
+    sink = _TokenSink(ctx.console)
+    orchestrator = ctx.make_orchestrator(
+        on_token=sink.feed,
+        stream=ctx.settings.cli_stream_tokens,
+    )
 
-    planned = await _plan_task_streaming(ctx, orchestrator, task_id)
+    planned = await _plan_task_streaming(ctx, orchestrator, task_id, sink)
     plan = TaskPlan.from_dict(planned.plan) if planned.plan is not None else None
     if plan is not None:
         ctx.console.print(Panel(format_plan(plan), title="plan", border_style="cyan"))
@@ -268,7 +301,7 @@ async def cmd_run(
         await orchestrator.approve_task(task_id)
         ctx.console.print("[green]plan approved[/]")
 
-    final = await _run_task_streaming(ctx, orchestrator, task_id)
+    final = await _run_task_streaming(ctx, orchestrator, task_id, sink)
     border = "green" if final.status == TaskStatus.COMPLETED else "red"
     ctx.console.print(
         Panel(
@@ -286,6 +319,7 @@ async def _plan_task_streaming(
     ctx: CliContext,
     orchestrator: Orchestrator,
     task_id: uuid.UUID,
+    sink: _TokenSink | None = None,
 ) -> Task:
     """Run the planner while rendering its broker events as they arrive."""
     container = ctx.container
@@ -301,7 +335,7 @@ async def _plan_task_streaming(
                     event = await asyncio.wait_for(queue.get(), timeout=_STREAM_KEEPALIVE_SECONDS)
                 except TimeoutError:
                     continue
-                render_event(ctx.console, event)
+                render_event(ctx.console, event, sink)
                 if event.kind == "planned":
                     return
         finally:
@@ -322,6 +356,7 @@ async def _run_task_streaming(
     ctx: CliContext,
     orchestrator: Orchestrator,
     task_id: uuid.UUID,
+    sink: _TokenSink | None = None,
 ) -> Task:
     """Run ``task_id`` while rendering its broker events as they arrive."""
     container = ctx.container
@@ -337,7 +372,7 @@ async def _run_task_streaming(
                     event = await asyncio.wait_for(queue.get(), timeout=_STREAM_KEEPALIVE_SECONDS)
                 except TimeoutError:
                     continue
-                render_event(ctx.console, event)
+                render_event(ctx.console, event, sink)
                 if event.kind in _TERMINAL_EVENT_KINDS:
                     return
         finally:
@@ -493,6 +528,7 @@ async def cmd_review(
                 "actionable feedback."
             ),
         )
+        sink = _TokenSink(ctx.console)
         agent = LoopAgent(
             llm=llm,
             executor=executor,
@@ -500,9 +536,12 @@ async def cmd_review(
             max_steps=max_steps,
             max_tokens=ctx.settings.llm_max_tokens,
             temperature=ctx.settings.llm_temperature,
+            on_token=sink.feed,
+            stream=ctx.settings.cli_stream_tokens,
         )
         result = await agent.run_from([seed])
-        ctx.console.print(result.answer)
+        if not sink.finish():
+            ctx.console.print(result.answer)
         return 0 if _verdict_passed(result.answer) else 1
     finally:
         await executor.sandboxes.close()
@@ -534,16 +573,20 @@ async def cmd_test(
             if llm is None:
                 llm = _build_llm(ctx)
             max_repairs = repairs if repairs is not None else ctx.settings.test_max_repairs
+            sink = _TokenSink(ctx.console)
             agent = RepairAgent(
                 llm=llm,
                 executor=executor,
                 max_repairs=max_repairs,
                 test_command=command,
                 test_framework=framework,
+                on_token=sink.feed,
+                stream=ctx.settings.cli_stream_tokens,
             )
             repair = await agent.run(
                 "Run the project's test suite and fix any failing tests."
             )
+            sink.finish()
             ctx.console.print(repair.answer)
             return 0 if _verdict_passed(repair.answer) else 1
 
@@ -574,12 +617,16 @@ async def cmd_test(
         await executor.sandboxes.close()
 
 
-def render_event(console: Console, event: OrchestratorEvent) -> None:
+def render_event(
+    console: Console,
+    event: OrchestratorEvent,
+    sink: _TokenSink | None = None,
+) -> None:
     """Render one orchestrator event as a line of CLI output."""
     if event.kind == "started":
         console.print(f"[bold cyan]started[/] {event.detail or ''}")
     elif event.kind == "message":
-        _render_message(console, event.message)
+        _render_message(console, event.message, sink)
     elif event.kind == "planned":
         console.print("[bold cyan]planned[/]")
     elif event.kind == "approved":
@@ -594,18 +641,20 @@ def render_event(console: Console, event: OrchestratorEvent) -> None:
         console.print("\n[bold yellow]cancelled[/]")
 
 
-def _render_message(console: Console, message: ChatMessage | None) -> None:
+def _render_message(
+    console: Console,
+    message: ChatMessage | None,
+    sink: _TokenSink | None = None,
+) -> None:
     if message is None:
         return
     if message.role == ChatRole.USER:
         console.print(f"[cyan]▶[/] {message.content}")
     elif message.role == ChatRole.ASSISTANT:
-        if message.tool_requests:
-            if message.content:
-                console.print(f"[green]◆[/] {message.content}")
-            for request in message.tool_requests:
-                console.print(f"  [yellow]→ {request.name} {json.dumps(request.arguments)}[/]")
-        else:
+        streamed = sink.finish() if sink is not None else False
+        if not streamed and message.content:
             console.print(f"[green]◆[/] {message.content}")
+        for request in message.tool_requests:
+            console.print(f"  [yellow]→ {request.name} {json.dumps(request.arguments)}[/]")
     elif message.role == ChatRole.TOOL:
         console.print(f"  [yellow]←[/] {_snippet(message.content)}")

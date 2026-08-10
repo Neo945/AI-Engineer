@@ -99,6 +99,8 @@ class Settings(BaseSettings):
     llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     llm_timeout_seconds: float = Field(default=120.0, ge=1.0)
 
+    cli_stream_tokens: bool = True
+
     task_max_attempts: int = Field(default=3, ge=1)
 
     pipeline_max_passes: int = Field(default=2, ge=0)
