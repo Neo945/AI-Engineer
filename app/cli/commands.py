@@ -105,13 +105,41 @@ def _resolve_test_run(
 
 
 def _final_verdict(answer: str) -> str | None:
-    """Return the token after the last ``VERDICT:`` line, if present."""
-    for line in reversed(answer.strip().splitlines()):
+    """Return the token from the first ``VERDICT:`` line, if present."""
+    for line in answer.strip().splitlines():
         stripped = line.strip()
         if stripped.upper().startswith("VERDICT:"):
-            token = stripped.split(":", 1)[1].strip().upper()
-            return token
+            return stripped.split(":", 1)[1].strip().upper()
     return None
+
+
+async def _reask_verdict(
+    agent: LoopAgent,
+    seed: ChatMessage,
+    answer: str,
+) -> str:
+    """Re-ask the reviewer for a verdict when it omitted one.
+
+    The follow-up seeds the same conversation plus the assistant's prior
+    answer and a terse instruction to restate the verdict, so the loop can
+    finish with a parseable ``VERDICT:`` line instead of silently exiting 1.
+    """
+    reask = ChatMessage(
+        role=ChatRole.USER,
+        content=(
+            "Your review above did not state a verdict. Reply now with "
+            "exactly one line first: 'VERDICT: PASS' or 'VERDICT: "
+            "CHANGES_NEEDED', then one short sentence of feedback."
+        ),
+    )
+    retry = await agent.run_from(
+        [
+            seed,
+            ChatMessage(role=ChatRole.ASSISTANT, content=answer),
+            reask,
+        ]
+    )
+    return retry.answer
 
 
 def _verdict_passed(answer: str) -> bool:
@@ -522,9 +550,9 @@ async def cmd_review(
             role=ChatRole.USER,
             content=(
                 f"Review {target} in this repository. Use the git status and "
-                "git diff tools (and file_read) to inspect the changes. Report "
-                "your findings, then end with exactly one line first: "
-                "'VERDICT: PASS' or 'VERDICT: CHANGES_NEEDED' followed by "
+                "git diff tools (and file_read) to inspect the changes. "
+                "Begin your final reply with exactly one line: 'VERDICT: PASS' "
+                "or 'VERDICT: CHANGES_NEEDED', then give your findings and "
                 "actionable feedback."
             ),
         )
@@ -540,9 +568,19 @@ async def cmd_review(
             stream=ctx.settings.cli_stream_tokens,
         )
         result = await agent.run_from([seed])
+        answer = result.answer
+        if _final_verdict(answer) is None:
+            sink.finish()
+            answer = await _reask_verdict(agent, seed, answer)
         if not sink.finish():
-            ctx.console.print(result.answer)
-        return 0 if _verdict_passed(result.answer) else 1
+            ctx.console.print(answer)
+        verdict = _final_verdict(answer)
+        if verdict is None:
+            ctx.console.print(
+                "[yellow]no verdict produced; treating the review as CHANGES_NEEDED[/]"
+            )
+            return 1
+        return 0 if verdict == "PASS" else 1
     finally:
         await executor.sandboxes.close()
 

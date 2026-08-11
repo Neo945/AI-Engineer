@@ -552,6 +552,7 @@ def test_final_verdict_detection() -> None:
 
     assert _final_verdict("VERDICT: PASS\nNo issues.") == "PASS"
     assert _final_verdict("## Findings\n...\nVERDICT: CHANGES_NEEDED") == "CHANGES_NEEDED"
+    assert _final_verdict("VERDICT: PASS\nVERDICT: CHANGES_NEEDED") == "PASS"
     assert _final_verdict("no verdict anywhere") is None
     assert _verdict_passed("## Findings\n...\nVERDICT: PASS") is True
     assert _verdict_passed("VERDICT: FAIL") is False
@@ -660,6 +661,42 @@ async def test_cmd_review_changes_needed_exits_one(tmp_path: Path) -> None:
 
     assert code == 1
     assert "CHANGES_NEEDED" in buffer.getvalue()
+
+
+async def test_cmd_review_reasks_missing_verdict(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    llm = FakeLLM(
+        [
+            _response("Looks fine to me."),
+            _response("VERDICT: PASS\nNo issues found."),
+        ]
+    )
+
+    code = await cmd_review(ctx, repo=repo, state=None, llm=llm, executor=_StubExecutor(repo))
+
+    assert code == 0
+    assert len(llm.calls) == 2
+    assert "VERDICT: PASS" in buffer.getvalue()
+
+
+async def test_cmd_review_returns_one_when_verdict_never_appears(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    llm = FakeLLM(
+        [
+            _response("Could be better."),
+            _response("Still no verdict."),
+        ]
+    )
+
+    code = await cmd_review(ctx, repo=repo, state=None, llm=llm, executor=_StubExecutor(repo))
+
+    assert code == 1
+    assert len(llm.calls) == 2
+    assert "no verdict produced" in buffer.getvalue()
 
 
 async def test_cmd_review_streams_tokens_live(tmp_path: Path) -> None:

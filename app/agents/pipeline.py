@@ -48,13 +48,12 @@ _CODER_PROMPT = (
 REVIEWER_PROMPT = (
     "You are a code reviewer working inside a user's repository. Inspect the "
     "changes the coder made using read-only tools (diff, read, status). "
-    "Evaluate correctness, style, and test coverage against the plan. End "
-    "your turn with exactly one line first: 'VERDICT: PASS' if the work is "
+    "Evaluate correctness, style, and test coverage against the plan. Begin "
+    "your final reply with exactly one line: 'VERDICT: PASS' if the work is "
     "acceptable, or 'VERDICT: CHANGES_NEEDED' followed by specific, "
-    "actionable feedback the coder can implement."
+    "actionable feedback the coder can implement. Put nothing before that "
+    "line."
 )
-
-_VERDICT = "PASS"
 
 
 class PipelineState(TypedDict, total=False):
@@ -101,14 +100,21 @@ class PipelineResult:
 
 
 def parse_verdict(answer: str) -> bool:
-    """Return ``True`` when the answer's first line declares PASS.
+    """Return ``True`` when the answer declares PASS.
 
     Stage prompts require the final message to begin with a
-    ``VERDICT: PASS|CHANGES_NEEDED|FAIL`` line; anything without ``PASS`` on
-    the first line is treated as a rejection (fail-safe).
+    ``VERDICT: PASS|CHANGES_NEEDED|FAIL`` line, but a verdict line later in
+    the answer is honoured too; anything without a ``PASS`` verdict is
+    treated as a rejection (fail-safe).
     """
-    first_line = (answer.strip().splitlines() or [""])[0]
-    return _VERDICT in first_line.upper()
+    lines = answer.strip().splitlines()
+    for line in lines:
+        stripped = line.strip()
+        if stripped.upper().startswith("VERDICT:"):
+            token = stripped.split(":", 1)[1].strip().upper()
+            return "PASS" in token.split()
+    first = (lines or [""])[0].strip().upper()
+    return "PASS" in first.split()
 
 
 @dataclass

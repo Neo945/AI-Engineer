@@ -73,6 +73,11 @@ def test_parse_verdict() -> None:
     assert parse_verdict("No verdict here.") is False
 
 
+def test_parse_verdict_scans_later_lines() -> None:
+    assert parse_verdict("## Findings\nEverything looks good.\nVERDICT: PASS") is True
+    assert parse_verdict("## Findings\nVERDICT: CHANGES_NEEDED\nAdd tests.") is False
+
+
 async def test_pipeline_happy_path() -> None:
     script = [
         _final_response("Plan: 1. Inspect. 2. Fix."),
