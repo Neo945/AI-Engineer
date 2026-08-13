@@ -68,6 +68,11 @@ def _snippet(text: str) -> str:
     return text[: _MAX_SNIPPET - 3] + "..."
 
 
+def _llm_failure_hint(exc: Exception) -> str:
+    detail = _short(str(exc).replace("\n", " ") or type(exc).__name__, 180)
+    return f"the model request failed: {detail}"
+
+
 async def _git(
     ctx: CliContext,
     repo: Path,
@@ -567,11 +572,14 @@ async def cmd_review(
             on_token=sink.feed,
             stream=ctx.settings.cli_stream_tokens,
         )
-        result = await agent.run_from([seed])
-        answer = result.answer
-        if _final_verdict(answer) is None:
-            sink.finish()
-            answer = await _reask_verdict(agent, seed, answer)
+        try:
+            result = await agent.run_from([seed])
+            answer = result.answer
+            if _final_verdict(answer) is None:
+                sink.finish()
+                answer = await _reask_verdict(agent, seed, answer)
+        except Exception as exc:
+            raise CliError(_llm_failure_hint(exc)) from exc
         if not sink.finish():
             ctx.console.print(answer)
         verdict = _final_verdict(answer)
@@ -621,9 +629,12 @@ async def cmd_test(
                 on_token=sink.feed,
                 stream=ctx.settings.cli_stream_tokens,
             )
-            repair = await agent.run(
-                "Run the project's test suite and fix any failing tests."
-            )
+            try:
+                repair = await agent.run(
+                    "Run the project's test suite and fix any failing tests."
+                )
+            except Exception as exc:
+                raise CliError(_llm_failure_hint(exc)) from exc
             sink.finish()
             ctx.console.print(repair.answer)
             return 0 if _verdict_passed(repair.answer) else 1

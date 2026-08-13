@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import subprocess
 import uuid
+from collections.abc import Sequence
 from io import StringIO
 from pathlib import Path
 
@@ -547,6 +548,19 @@ def _response(content: str) -> LLMResponse:
     )
 
 
+class _RaisingLLM(FakeLLM):
+    async def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[ToolSpec],
+        system: str | None = None,
+        max_tokens: int,
+        temperature: float,
+    ) -> LLMResponse:
+        raise RuntimeError("provider exploded")
+
+
 def test_final_verdict_detection() -> None:
     from app.cli.commands import _final_verdict, _verdict_passed
 
@@ -697,6 +711,27 @@ async def test_cmd_review_returns_one_when_verdict_never_appears(tmp_path: Path)
     assert code == 1
     assert len(llm.calls) == 2
     assert "no verdict produced" in buffer.getvalue()
+
+
+async def test_cmd_review_llm_failure_is_friendly(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, _ = _console()
+    ctx = CliContext(console=console, settings=_settings())
+
+    with pytest.raises(CliError, match="the model request failed"):
+        await cmd_review(
+            ctx, repo=repo, state=None, llm=_RaisingLLM(), executor=_StubExecutor(repo)
+        )
+
+
+async def test_cmd_test_fix_llm_failure_is_friendly(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, _ = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    stub = _StubExecutor(repo, [_report(ok=False), _report(ok=True)])
+
+    with pytest.raises(CliError, match="the model request failed"):
+        await cmd_test(ctx, repo=repo, state=None, fix=True, llm=_RaisingLLM(), executor=stub)
 
 
 async def test_cmd_review_streams_tokens_live(tmp_path: Path) -> None:

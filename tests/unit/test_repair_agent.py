@@ -160,3 +160,22 @@ async def test_messages_streamed_via_on_message(tmp_path: Path) -> None:
         ChatRole.ASSISTANT,
         ChatRole.ASSISTANT,
     ]
+
+
+async def test_tokens_streamed_via_on_token(tmp_path: Path) -> None:
+    tokens: list[str] = []
+    llm = FakeLLM([_response("Fixed it.")])
+    agent = _agent(
+        tmp_path,
+        [_report(ok=False), _report(ok=True)],
+        llm,
+        max_repairs=2,
+        stream=True,
+        on_token=lambda text: tokens.append(text),
+    )
+
+    result = await agent.run("Fix the bug")
+
+    assert "".join(tokens) == "Fixed it."
+    assert result.answer.startswith("VERDICT: PASS")
+    assert result.repairs == 1
