@@ -7,23 +7,23 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from app.database.models.enums import TaskStatus
 from app.database.models.message import Message
-from app.database.models.session import Session
 from app.database.models.task import Task
 from app.database.repositories.message import MessageRepository
-from app.database.repositories.session import SessionRepository
 from app.database.repositories.task import TaskRepository
 from app.gateway.dependencies import (
     CancellationRegistryDep,
     ContainerDep,
     EventBrokerDep,
     OrchestratorDep,
+    OwnedSessionDep,
+    OwnedTaskDep,
     SessionDep,
 )
 from app.gateway.schemas import (
@@ -40,21 +40,6 @@ _SSE_KEEPALIVE_SECONDS = 15.0
 _TERMINAL_STATUSES = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED})
 
 
-async def get_session_or_404(session_id: uuid.UUID, db: SessionDep) -> Session:
-    """Resolve a session by id, or 404.
-
-    Declared before the orchestrator dependency so a missing session wins
-    over an unconfigured LLM.
-    """
-    session = await SessionRepository(db).get(session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="session not found")
-    return session
-
-
-SessionOr404Dep = Annotated[Session, Depends(get_session_or_404)]
-
-
 @router.post(
     "/sessions/{session_id}/tasks",
     response_model=TaskResponse,
@@ -65,7 +50,7 @@ async def create_and_run_task(
     body: TaskCreateRequest,
     background_tasks: BackgroundTasks,
     db: SessionDep,
-    session: SessionOr404Dep,
+    session: OwnedSessionDep,
     orchestrator: OrchestratorDep,
     container: ContainerDep,
 ) -> Task:
@@ -104,6 +89,7 @@ async def plan_task(
     task_id: uuid.UUID,
     background_tasks: BackgroundTasks,
     db: SessionDep,
+    task: OwnedTaskDep,
     orchestrator: OrchestratorDep,
 ) -> Task:
     """Run the planner over a task in the background.
@@ -114,9 +100,6 @@ async def plan_task(
     rejected via ``POST /tasks/{task_id}/reject``). Progress streams on the
     task's SSE events endpoint.
     """
-    task = await TaskRepository(db).get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="task not found")
     background_tasks.add_task(orchestrator.plan_task, task_id)
     return task
 
@@ -125,37 +108,36 @@ async def plan_task(
 async def approve_task(
     task_id: uuid.UUID,
     db: SessionDep,
+    task: OwnedTaskDep,
     orchestrator: OrchestratorDep,
 ) -> Task:
     """Approve a task's plan so it may run."""
-    return await _decide_task(task_id, db, orchestrator, approve=True)
+    return await _decide_task(task, db, orchestrator, approve=True)
 
 
 @router.post("/tasks/{task_id}/reject", response_model=TaskResponse)
 async def reject_task(
     task_id: uuid.UUID,
     db: SessionDep,
+    task: OwnedTaskDep,
     orchestrator: OrchestratorDep,
 ) -> Task:
     """Reject a task's plan, blocking execution until it is re-planned."""
-    return await _decide_task(task_id, db, orchestrator, approve=False)
+    return await _decide_task(task, db, orchestrator, approve=False)
 
 
 async def _decide_task(
-    task_id: uuid.UUID,
+    task: Task,
     db: SessionDep,
     orchestrator: OrchestratorDep,
     *,
     approve: bool,
 ) -> Task:
-    task = await TaskRepository(db).get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="task not found")
     try:
         if approve:
-            await orchestrator.approve_task(task_id)
+            await orchestrator.approve_task(task.id)
         else:
-            await orchestrator.reject_task(task_id)
+            await orchestrator.reject_task(task.id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await db.refresh(task)
@@ -166,7 +148,7 @@ async def _decide_task(
 async def list_tasks(
     session_id: uuid.UUID,
     db: SessionDep,
-    session: SessionOr404Dep,
+    session: OwnedSessionDep,
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> Sequence[Task]:
@@ -178,11 +160,9 @@ async def list_tasks(
 async def get_task_detail(
     task_id: uuid.UUID,
     db: SessionDep,
+    task: OwnedTaskDep,
 ) -> TaskDetailResponse:
     """Return a task with its persisted transcript."""
-    task = await TaskRepository(db).get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="task not found")
     messages = await MessageRepository(db).list_by_task(task_id)
     return TaskDetailResponse(
         **TaskResponse.model_validate(task).model_dump(),
@@ -199,6 +179,7 @@ async def retry_task(
     task_id: uuid.UUID,
     background_tasks: BackgroundTasks,
     db: SessionDep,
+    task: OwnedTaskDep,
     orchestrator: OrchestratorDep,
 ) -> Task:
     """Reset a terminal task and schedule it to run again.
@@ -207,9 +188,6 @@ async def retry_task(
     have exhausted its attempt budget; otherwise the request is rejected with
     ``409``. The prior transcript is preserved and the new run appends to it.
     """
-    task = await TaskRepository(db).get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="task not found")
     try:
         await orchestrator.retry_task(task_id)
     except ValueError as exc:
@@ -228,6 +206,7 @@ async def run_task(
     task_id: uuid.UUID,
     background_tasks: BackgroundTasks,
     db: SessionDep,
+    task: OwnedTaskDep,
     orchestrator: OrchestratorDep,
 ) -> Task:
     """Schedule a task to run, usually after its plan is approved.
@@ -236,9 +215,6 @@ async def run_task(
     ``409``. The run executes asynchronously; watch the task's SSE events
     endpoint or poll ``GET /tasks/{task_id}``.
     """
-    task = await TaskRepository(db).get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="task not found")
     if task.plan_needs_approval and task.plan_approved is None:
         raise HTTPException(status_code=409, detail="task plan awaits approval")
     if task.plan_approved is False:
@@ -251,6 +227,7 @@ async def run_task(
 async def cancel_task(
     task_id: uuid.UUID,
     db: SessionDep,
+    task: OwnedTaskDep,
     cancellations: CancellationRegistryDep,
 ) -> Task:
     """Cancel a pending or running task.
@@ -260,9 +237,6 @@ async def cancel_task(
     boundary and emits a ``cancelled`` event. Terminal tasks cannot be
     cancelled (``409``).
     """
-    task = await TaskRepository(db).get(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail="task not found")
     if task.status in _TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail="task already finished")
     task.status = TaskStatus.CANCELLED
@@ -278,7 +252,8 @@ async def stream_task_events(
     session_id: uuid.UUID,
     task_id: uuid.UUID,
     db: SessionDep,
-    session: SessionOr404Dep,
+    session: OwnedSessionDep,
+    task: OwnedTaskDep,
     broker: EventBrokerDep,
 ) -> StreamingResponse:
     """Stream a task's progress as Server-Sent Events.
@@ -289,8 +264,7 @@ async def stream_task_events(
     DB state is the source of truth; broker events only wake the streamer so
     updates arrive promptly rather than on a poll interval.
     """
-    task = await TaskRepository(db).get(task_id)
-    if task is None or task.session_id != session_id:
+    if task.session_id != session_id:
         raise HTTPException(status_code=404, detail="task not found")
 
     queue = await broker.subscribe(task_id)

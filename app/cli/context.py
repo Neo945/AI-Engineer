@@ -112,8 +112,9 @@ async def find_repo_root(start: Path) -> Path:
 async def ensure_cli_user(session: AsyncSession) -> User:
     """Return the shared local CLI user, creating it on first use.
 
-    Auth is not wired yet, so ``engineer init`` binds workspaces to one
-    local user; ownership checks land with the auth phase.
+    The CLI drives the agent in-process and binds ``engineer init`` to one
+    local user with no password hash, so it cannot authenticate over the
+    gateway (whose endpoints enforce ownership for HTTP clients).
     """
     user = await UserRepository(session).get_by_email(CLI_USER_EMAIL)
     if user is None:

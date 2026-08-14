@@ -22,6 +22,10 @@ class Settings(BaseSettings):
         log_level: Root logging level.
         json_logs: Emit structured JSON logs instead of readable output.
         api_prefix: URL prefix for all API routes.
+        auth_secret: Secret key used to sign access tokens. Generate a long
+            random value for any non-development deployment.
+        auth_token_ttl_seconds: Lifetime of an issued access token.
+        auth_token_issuer: ``iss`` claim stamped on every access token.
         database_url: Async SQLAlchemy URL for PostgreSQL.
         redis_url: URL for Redis (cache, rate limits, pub/sub).
         embedding_dimension: Fixed pgvector dimension. Changing this after
@@ -79,6 +83,10 @@ class Settings(BaseSettings):
     json_logs: bool = True
 
     api_prefix: str = "/api/v1"
+
+    auth_secret: str = Field(default="dev-only-secret-change-me-in-prod", min_length=32)
+    auth_token_ttl_seconds: int = Field(default=86_400, ge=60)
+    auth_token_issuer: str = "coding-agent"
 
     database_url: str = "postgresql+asyncpg://coding:coding@localhost:5432/coding_agent"
     redis_url: str = "redis://localhost:6379/0"
