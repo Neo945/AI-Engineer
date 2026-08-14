@@ -12,6 +12,7 @@ from app.database.base import Base
 from app.database.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
+    from app.database.models.memory import MemoryEntry
     from app.database.models.session import Session
     from app.database.models.user import User
 
@@ -41,6 +42,12 @@ class Workspace(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     owner: Mapped[User] = relationship("User", back_populates="workspaces", lazy="joined")
     sessions: Mapped[list[Session]] = relationship(
         "Session",
+        back_populates="workspace",
+        lazy="selectin",
+        cascade="all, delete-orphan",
+    )
+    memory_entries: Mapped[list[MemoryEntry]] = relationship(
+        "MemoryEntry",
         back_populates="workspace",
         lazy="selectin",
         cascade="all, delete-orphan",

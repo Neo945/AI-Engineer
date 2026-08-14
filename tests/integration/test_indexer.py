@@ -44,11 +44,7 @@ def _build_repo(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (repo / "app" / "notes.ts").write_text(
-        "export class Notes {\n"
-        "  list() {\n"
-        "    return [];\n"
-        "  }\n"
-        "}\n",
+        "export class Notes {\n  list() {\n    return [];\n  }\n}\n",
         encoding="utf-8",
     )
     (repo / "README.md").write_text("not source", encoding="utf-8")

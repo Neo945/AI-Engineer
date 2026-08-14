@@ -52,7 +52,17 @@ REVIEWER_PROMPT = (
     "your final reply with exactly one line: 'VERDICT: PASS' if the work is "
     "acceptable, or 'VERDICT: CHANGES_NEEDED' followed by specific, "
     "actionable feedback the coder can implement. Put nothing before that "
-    "line."
+    "line. "
+    "After the verdict, list each finding as an entry in a single JSON array "
+    "inside a fenced code block, like:\n"
+    '```json\n'
+    '[{"severity": "high", "file": "app/auth.py", "line": 12, '
+    '"problem": "short description", "reason": "why it matters", '
+    '"fix": "suggested fix"}]\n'
+    "```\n"
+    "severity is one of critical, high, medium, low, nit; line may be null; "
+    "reason and fix are optional. Emit an empty array [] when the review is "
+    "clean."
 )
 
 

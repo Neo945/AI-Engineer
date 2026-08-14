@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from app.database.repositories.base import BaseRepository
 from app.database.repositories.code_chunk import CodeChunkRepository
+from app.database.repositories.memory import MemoryRepository
 from app.database.repositories.message import MessageRepository
 from app.database.repositories.session import SessionRepository
 from app.database.repositories.task import TaskRepository
@@ -17,6 +18,7 @@ from app.database.repositories.workspace import WorkspaceRepository
 __all__ = [
     "BaseRepository",
     "CodeChunkRepository",
+    "MemoryRepository",
     "MessageRepository",
     "SessionRepository",
     "TaskRepository",

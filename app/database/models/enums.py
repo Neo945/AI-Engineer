@@ -60,3 +60,18 @@ class MessageRole(StrEnum):
     USER = "user"
     ASSISTANT = "assistant"
     TOOL = "tool"
+
+
+class MemoryKind(StrEnum):
+    """Scope of a durable memory entry.
+
+    ``FACT`` captures durable repository facts; ``DECISION`` records why a
+    design or tooling choice was made; ``PREFERENCE`` stores user working
+    preferences; ``CONVERSATION`` keeps high-signal exchanges worth replaying
+    to later sessions.
+    """
+
+    FACT = "fact"
+    DECISION = "decision"
+    PREFERENCE = "preference"
+    CONVERSATION = "conversation"

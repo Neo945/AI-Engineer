@@ -645,9 +645,7 @@ async def test_cmd_test_repair_exhausts_attempts_exits_one(tmp_path: Path) -> No
     llm = FakeLLM([_response("try1\nVERDICT: FAIL"), _response("try2\nVERDICT: FAIL")])
     stub = _StubExecutor(repo, [_report(ok=False), _report(ok=False), _report(ok=False)])
 
-    code = await cmd_test(
-        ctx, repo=repo, state=None, fix=True, repairs=2, llm=llm, executor=stub
-    )
+    code = await cmd_test(ctx, repo=repo, state=None, fix=True, repairs=2, llm=llm, executor=stub)
 
     assert code == 1
     assert "VERDICT: FAIL" in buffer.getvalue()
@@ -711,6 +709,52 @@ async def test_cmd_review_returns_one_when_verdict_never_appears(tmp_path: Path)
     assert code == 1
     assert len(llm.calls) == 2
     assert "no verdict produced" in buffer.getvalue()
+
+
+async def test_cmd_review_renders_structured_findings(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    answer = """\
+VERDICT: CHANGES_NEEDED
+The auth logic needs a fix.
+```json
+[
+  {
+    "severity": "high",
+    "file": "app/auth.py",
+    "line": 12,
+    "problem": "expiry never checked",
+    "reason": "expired tokens are accepted",
+    "fix": "compare now <= exp"
+  }
+]
+```
+"""
+    llm = FakeLLM([_response(answer)])
+
+    code = await cmd_review(ctx, repo=repo, state=None, llm=llm, executor=_StubExecutor(repo))
+
+    assert code == 1
+    text = buffer.getvalue()
+    assert "VERDICT: CHANGES_NEEDED" in text
+    assert "review findings (1)" in text
+    assert "HIGH" in text
+    assert "app/auth.py:12" in text
+    assert "expiry never checked" in text
+    assert "compare now <= exp" in text
+
+
+async def test_cmd_review_degrades_without_findings(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    llm = FakeLLM([_response("VERDICT: PASS\nAll good.")])
+
+    code = await cmd_review(ctx, repo=repo, state=None, llm=llm, executor=_StubExecutor(repo))
+
+    assert code == 0
+    assert "no structured findings parsed" in buffer.getvalue()
 
 
 async def test_cmd_review_llm_failure_is_friendly(tmp_path: Path) -> None:

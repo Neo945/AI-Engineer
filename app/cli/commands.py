@@ -11,7 +11,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import tempfile
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,19 +37,30 @@ from app.cli.context import (
     save_state,
 )
 from app.database.models.enums import TaskStatus
+from app.database.models.memory import MemoryEntry
 from app.database.models.session import Session
 from app.database.models.task import Task
 from app.database.models.workspace import Workspace
 from app.database.repositories.task import TaskRepository
 from app.database.repositories.workspace import WorkspaceRepository
+from app.evals import (
+    BENCHMARK_TASKS,
+    EvalResultRecord,
+    EvalRunner,
+    ResultStore,
+    summarize,
+    task_by_id,
+)
 from app.executor.executor import ToolExecutor, _detect_test_command
 from app.executor.git import GitOutput, run_git
 from app.executor.test_parser import TestReport, format_report
 from app.llm.factory import build_llm_client
 from app.llm.messages import ChatMessage, ChatRole
 from app.llm.protocol import LLMProvider
+from app.memory.service import MemoryService
 from app.orchestrator.orchestrator import Orchestrator, OrchestratorEvent
 from app.retrieval.indexer import RepositoryIndexer
+from app.review import ReviewFinding, extract_verdict, parse_report, sort_findings
 from app.tools.schemas import ToolCall, ToolName
 
 _TERMINAL_STATUSES = frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED})
@@ -111,11 +125,7 @@ def _resolve_test_run(
 
 def _final_verdict(answer: str) -> str | None:
     """Return the token from the first ``VERDICT:`` line, if present."""
-    for line in answer.strip().splitlines():
-        stripped = line.strip()
-        if stripped.upper().startswith("VERDICT:"):
-            return stripped.split(":", 1)[1].strip().upper()
-    return None
+    return extract_verdict(answer)
 
 
 async def _reask_verdict(
@@ -558,7 +568,9 @@ async def cmd_review(
                 "git diff tools (and file_read) to inspect the changes. "
                 "Begin your final reply with exactly one line: 'VERDICT: PASS' "
                 "or 'VERDICT: CHANGES_NEEDED', then give your findings and "
-                "actionable feedback."
+                "actionable feedback, and finish with your findings as a JSON "
+                "array in a ```json``` fenced block as described in your "
+                "instructions."
             ),
         )
         sink = _TokenSink(ctx.console)
@@ -588,6 +600,11 @@ async def cmd_review(
                 "[yellow]no verdict produced; treating the review as CHANGES_NEEDED[/]"
             )
             return 1
+        report = parse_report(answer)
+        if report.findings:
+            _render_findings_table(ctx.console, report.findings)
+        else:
+            ctx.console.print("[dim]no structured findings parsed[/]")
         return 0 if verdict == "PASS" else 1
     finally:
         await executor.sandboxes.close()
@@ -630,9 +647,7 @@ async def cmd_test(
                 stream=ctx.settings.cli_stream_tokens,
             )
             try:
-                repair = await agent.run(
-                    "Run the project's test suite and fix any failing tests."
-                )
+                repair = await agent.run("Run the project's test suite and fix any failing tests.")
             except Exception as exc:
                 raise CliError(_llm_failure_hint(exc)) from exc
             sink.finish()
@@ -664,6 +679,146 @@ async def cmd_test(
         return 0 if report.ok else 1
     finally:
         await executor.sandboxes.close()
+
+
+async def _render_memory_entries(ctx: CliContext, entries: Sequence[MemoryEntry]) -> None:
+    """Print memory entries as a table with a count summary."""
+    rows = list(entries)
+    if not rows:
+        ctx.console.print("[dim]no memory entries[/]")
+        return
+    table = Table(title=f"memory ({len(rows)} entries)")
+    table.add_column("kind", style="cyan")
+    table.add_column("source", style="magenta")
+    table.add_column("remembered", style="dim")
+    table.add_column("content")
+    for entry in rows:
+        when = entry.created_at.strftime("%Y-%m-%d %H:%M") if entry.created_at else "?"
+        table.add_row(str(entry.kind), entry.source, when, _snippet(entry.content))
+    ctx.console.print(table)
+
+
+_SEVERITY_STYLE = {
+    "critical": "bold red",
+    "high": "red",
+    "medium": "yellow",
+    "low": "cyan",
+    "nit": "dim",
+}
+
+
+def _render_findings_table(
+    console: Console, findings: Sequence[ReviewFinding]
+) -> None:
+    """Render review findings as a severity-ordered table."""
+    ordered = sort_findings(list(findings))
+    table = Table(title=f"review findings ({len(ordered)})")
+    table.add_column("severity", style="bold")
+    table.add_column("location", style="cyan")
+    table.add_column("problem")
+    table.add_column("suggested fix")
+    for finding in ordered:
+        location = finding.file
+        if finding.line is not None:
+            location = f"{location}:{finding.line}"
+        style = _SEVERITY_STYLE.get(finding.severity.value, "")
+        table.add_row(
+            f"[{style}]{finding.severity.value.upper()}[/]",
+            location,
+            finding.problem,
+            finding.fix or "",
+        )
+    console.print(table)
+
+
+async def cmd_memory_add(
+    ctx: CliContext,
+    *,
+    repo: Path,
+    state: WorkspaceState,
+    content: str,
+    kind: str,
+) -> int:
+    """Remember a durable fact, decision, or preference for this workspace."""
+    content = content.strip()
+    if not content:
+        raise CliError("memory content is empty")
+    from app.database.models.enums import MemoryKind
+
+    async with ctx.db_session() as session:
+        await MemoryService.from_session(session).remember(
+            state.workspace_id,
+            content=content,
+            kind=MemoryKind(kind),
+            source="cli",
+        )
+        await session.commit()
+    ctx.console.print(f"[green]remembered[/] [bold]{_short(content)}[/] as {kind}")
+    return 0
+
+
+async def cmd_memory_list(
+    ctx: CliContext,
+    *,
+    repo: Path,
+    state: WorkspaceState,
+    kind: str | None,
+    limit: int,
+) -> int:
+    """List remembered entries, newest first, optionally filtered by kind."""
+    from app.database.models.enums import MemoryKind
+
+    async with ctx.db_session() as session:
+        entries = await MemoryService.from_session(session).list(
+            state.workspace_id,
+            kind=MemoryKind(kind) if kind else None,
+            limit=limit,
+        )
+    await _render_memory_entries(ctx, entries)
+    return 0
+
+
+async def cmd_memory_recall(
+    ctx: CliContext,
+    *,
+    repo: Path,
+    state: WorkspaceState,
+    query: str,
+    limit: int,
+) -> int:
+    """Search remembered entries for the most relevant to ``query``."""
+    query = query.strip()
+    if not query:
+        raise CliError("recall query is empty")
+    async with ctx.db_session() as session:
+        entries = await MemoryService.from_session(session).recall(
+            state.workspace_id,
+            query,
+            limit=limit,
+        )
+    await _render_memory_entries(ctx, entries)
+    return 0
+
+
+async def cmd_memory_clear(
+    ctx: CliContext,
+    *,
+    repo: Path,
+    state: WorkspaceState,
+    yes: bool,
+) -> int:
+    """Delete every remembered entry for this workspace."""
+    async with ctx.db_session() as session:
+        count = await MemoryService.from_session(session).count(state.workspace_id)
+        if not yes:
+            confirmed = Confirm.ask(f"Delete all {count} memory entries? [y/N]", default=False)
+            if not confirmed:
+                ctx.console.print("[dim]cancelled[/]")
+                return 1
+        deleted = await MemoryService.from_session(session).clear(state.workspace_id)
+        await session.commit()
+    ctx.console.print(f"[green]cleared[/] {deleted} memory entries")
+    return 0
 
 
 def render_event(
@@ -707,3 +862,157 @@ def _render_message(
             console.print(f"  [yellow]→ {request.name} {json.dumps(request.arguments)}[/]")
     elif message.role == ChatRole.TOOL:
         console.print(f"  [yellow]←[/] {_snippet(message.content)}")
+
+
+async def cmd_eval_list(ctx: CliContext, *, repo: Path) -> int:
+    """List the registered benchmark tasks."""
+    if not BENCHMARK_TASKS:
+        ctx.console.print("[dim]no benchmark tasks registered[/]")
+        return 0
+    table = Table(title=f"benchmark tasks ({len(BENCHMARK_TASKS)})")
+    table.add_column("id", style="cyan")
+    table.add_column("category", style="magenta")
+    table.add_column("name")
+    table.add_column("goal")
+    for task in BENCHMARK_TASKS:
+        table.add_row(task.id, task.category, task.name, _short(task.goal, 80))
+    ctx.console.print(table)
+    ctx.console.print("[dim]run one with `engineer eval run <id>`[/]")
+    return 0
+
+
+async def cmd_eval_run(
+    ctx: CliContext,
+    *,
+    task_id: str,
+    workspace: str | None,
+    keep: bool,
+    timeout: int | None,
+    results_path: str | None,
+    llm: LLMProvider | None = None,
+    runner: EvalRunner | None = None,
+) -> int:
+    """Run one benchmark task headlessly against the LLM and record the result.
+
+    Exit code 0 means the task completed and its verification suite passed.
+    The scratch workspace is temporary and deleted unless ``keep`` is set or
+    ``workspace`` was provided.
+    """
+    try:
+        task = task_by_id(task_id)
+    except KeyError:
+        raise CliError(f"unknown benchmark task: {task_id} (see `engineer eval list`)") from None
+
+    if llm is None:
+        llm = _build_llm(ctx)
+
+    temp_dir: str | None = None
+    try:
+        if workspace:
+            workspace_dir = Path(workspace)
+        else:
+            temp_dir = tempfile.mkdtemp(prefix=f"engineer-eval-{task.id}-")
+            workspace_dir = Path(temp_dir)
+
+        if runner is None:
+            container = ctx.require_container()
+            runner = EvalRunner(
+                session_factory=container.session_factory,
+                llm=llm,
+                settings=ctx.settings,
+                timeout_seconds=timeout,
+            )
+        store = ResultStore(Path(results_path or ctx.settings.eval_results_path).expanduser())
+        ctx.console.print(
+            f"[bold cyan]▶[/] benchmark [bold]{task.id}[/] — {task.name}  [dim]({task.category})[/]"
+        )
+        record = await runner.run(task, workspace_dir, store=store)
+        _render_eval_result(ctx.console, record)
+        return 0 if record.passed else 1
+    finally:
+        if temp_dir is not None and not keep and not ctx.settings.eval_keep_workspaces:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+async def cmd_eval_results(
+    ctx: CliContext,
+    *,
+    model: str | None,
+    results_path: str | None,
+) -> int:
+    """Show recorded evaluation results, newest first."""
+    store = ResultStore(Path(results_path or ctx.settings.eval_results_path).expanduser())
+    records = [
+        record for record in reversed(store.load()) if model is None or record.model == model
+    ]
+    if not records:
+        ctx.console.print(f"[dim]no eval results at {store.path}[/]")
+        return 1
+    table = Table(title=f"eval results ({len(records)} runs)")
+    table.add_column("finished", style="dim")
+    table.add_column("task", style="cyan")
+    table.add_column("model", style="magenta")
+    table.add_column("status")
+    table.add_column("tests")
+    table.add_column("verdict")
+    for record in records:
+        when = record.finished_at.strftime("%Y-%m-%d %H:%M")
+        status = record.task_status
+        tests = record.test_summary
+        verdict = "PASS" if record.passed else "FAIL"
+        table.add_row(
+            when,
+            record.task_id,
+            record.model,
+            status,
+            tests,
+            f"[{'green' if record.passed else 'red'}]{verdict}[/]",
+        )
+    ctx.console.print(table)
+    passed = sum(1 for record in records if record.passed)
+    ctx.console.print(f"[dim]{passed}/{len(records)} passed[/]")
+    return 0
+
+
+async def cmd_eval_compare(ctx: CliContext, *, results_path: str | None) -> int:
+    """Compare pass rates across models from the recorded results."""
+    store = ResultStore(Path(results_path or ctx.settings.eval_results_path).expanduser())
+    records = store.load()
+    if not records:
+        ctx.console.print(f"[dim]no eval results at {store.path}[/]")
+        return 1
+    summaries = summarize(records)
+    table = Table(title="model comparison")
+    table.add_column("model", style="magenta")
+    table.add_column("runs")
+    table.add_column("passed")
+    table.add_column("pass rate")
+    for summary in summaries:
+        table.add_row(
+            summary.model,
+            str(summary.runs),
+            str(summary.passed),
+            f"{summary.pass_rate:.0%}",
+        )
+    ctx.console.print(table)
+    return 0
+
+
+def _render_eval_result(console: Console, record: EvalResultRecord) -> None:
+    """Render one eval run's outcome as a verdict panel."""
+    style = "green" if record.passed else "red"
+    console.print(
+        Panel(
+            f"task: [bold]{record.task_id}[/] ({record.task_name})\n"
+            f"model: {record.provider}/{record.model}\n"
+            f"status: {record.task_status}  ·  tests: "
+            f"{'pass' if record.tests_passed else 'fail'}\n"
+            f"attempts: {record.attempts}  ·  tokens: {record.tokens}  ·  "
+            f"duration: {record.duration_seconds:.1f}s\n"
+            f"{record.test_summary}",
+            title=f"eval {record.task_id} — {'PASS' if record.passed else 'FAIL'}",
+            border_style=style,
+        )
+    )
+    if record.output_tail:
+        console.print(Syntax(record.output_tail, "text", theme="ansi_dark"))

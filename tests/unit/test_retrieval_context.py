@@ -68,11 +68,9 @@ class _FakeRepository:
         *,
         limit: int = 20,
     ) -> Sequence[CodeChunk]:
-        return [
-            chunk
-            for chunk in self._chunks
-            if name in (chunk.meta.get("symbols") or [])
-        ][:limit]
+        return [chunk for chunk in self._chunks if name in (chunk.meta.get("symbols") or [])][
+            :limit
+        ]
 
     async def keyword_search(
         self,
@@ -81,9 +79,7 @@ class _FakeRepository:
         *,
         limit: int = 20,
     ) -> Sequence[CodeChunk]:
-        return [
-            chunk for chunk in self._chunks if query.lower() in chunk.content.lower()
-        ][:limit]
+        return [chunk for chunk in self._chunks if query.lower() in chunk.content.lower()][:limit]
 
 
 @pytest.mark.asyncio

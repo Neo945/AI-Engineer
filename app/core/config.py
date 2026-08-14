@@ -60,6 +60,16 @@ class Settings(BaseSettings):
         retrieval_max_chunks: Cap on chunks in a retrieved context window.
         retrieval_max_chars: Cap on total context content characters; the
             assembler keeps the highest-ranked chunks that fit the budget.
+        memory_enabled: Recall and inject durable project memory into the
+            agent loop at the start of each run.
+        memory_max_entries: Cap on memory entries injected per run.
+        memory_max_chars: Cap on total memory block characters; entries are
+            dropped from the bottom until the block fits.
+        eval_results_path: JSONL file where headless eval results accumulate.
+        eval_default_timeout_seconds: Default wall-clock cap for one eval run
+            when the benchmark task does not specify its own timeout.
+        eval_keep_workspaces: Keep eval scratch workspaces on disk after a
+            run instead of deleting them.
         command_policy_enabled: Classify sandboxed terminal commands against
             deny/confirm rules (destructive commands are blocked or require
             ``confirm=True``).
@@ -119,6 +129,14 @@ class Settings(BaseSettings):
     retrieval_enabled: bool = True
     retrieval_max_chunks: int = Field(default=20, ge=1)
     retrieval_max_chars: int = Field(default=12_000, ge=256)
+
+    memory_enabled: bool = True
+    memory_max_entries: int = Field(default=20, ge=1)
+    memory_max_chars: int = Field(default=4_000, ge=256)
+
+    eval_results_path: str = ".engineer/eval-results.jsonl"
+    eval_default_timeout_seconds: int = Field(default=300, ge=30)
+    eval_keep_workspaces: bool = False
 
     command_policy_enabled: bool = True
     command_deny_extra: list[str] = Field(default_factory=list)

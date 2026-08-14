@@ -35,6 +35,14 @@ examples:
   engineer test                     run the project's test suite (sandboxed)
   engineer test --fix               run tests and repair failures, then re-run
   engineer review                   structured review of the working tree
+  engineer memory add "pins are async" --kind decision
+  engineer memory list --limit 20
+  engineer memory recall "why sqlite?"
+  engineer memory clear
+  engineer eval list
+  engineer eval run fix-auth-bug
+  engineer eval results
+  engineer eval compare
   engineer tasks --limit 20
   engineer diff HEAD~1
   engineer commit -m "fix: ..."
@@ -127,6 +135,94 @@ def build_parser() -> ArgumentParser:
         help="max fix->re-run iterations with --fix (default: TEST_MAX_REPAIRS)",
     )
     test.set_defaults(handler=_cmd_test)
+
+    memory = subparsers.add_parser("memory", help="inspect and edit the workspace's durable memory")
+    memory_sub = memory.add_subparsers(dest="memory_command", required=True, metavar="subcommand")
+
+    memory_add = memory_sub.add_parser("add", help="remember a fact, decision, or preference")
+    memory_add.add_argument(
+        "--kind",
+        choices=("fact", "decision", "preference", "conversation"),
+        default="fact",
+        help="what kind of memory to record (default: fact)",
+    )
+    memory_add.add_argument("content", nargs="+", help="the memory to remember")
+    memory_add.set_defaults(memory_handler=_cmd_memory_add)
+
+    memory_list = memory_sub.add_parser("list", help="list remembered entries (newest first)")
+    memory_list.add_argument(
+        "--kind",
+        choices=("fact", "decision", "preference", "conversation"),
+        help="only entries of this kind",
+    )
+    memory_list.add_argument("--limit", type=int, default=100, help="how many entries to show")
+    memory_list.set_defaults(memory_handler=_cmd_memory_list)
+
+    memory_recall = memory_sub.add_parser("recall", help="search remembered entries for a topic")
+    memory_recall.add_argument("query", nargs="+", help="the topic to recall")
+    memory_recall.add_argument("--limit", type=int, default=20, help="how many entries to show")
+    memory_recall.set_defaults(memory_handler=_cmd_memory_recall)
+
+    memory_clear = memory_sub.add_parser("clear", help="delete every remembered entry")
+    memory_clear.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="skip the confirmation prompt",
+    )
+    memory_clear.set_defaults(memory_handler=_cmd_memory_clear)
+
+    eval_cmd = subparsers.add_parser(
+        "eval",
+        help="run headless benchmark evaluations against the LLM",
+    )
+    eval_sub = eval_cmd.add_subparsers(dest="eval_command", required=True, metavar="subcommand")
+
+    eval_list = eval_sub.add_parser("list", help="list the benchmark tasks")
+    eval_list.set_defaults(eval_handler=_cmd_eval_list)
+
+    eval_run = eval_sub.add_parser(
+        "run",
+        help="run one benchmark task headlessly and record the result",
+    )
+    eval_run.add_argument("task_id", help="benchmark task id (see `engineer eval list`)")
+    eval_run.add_argument(
+        "--workspace",
+        help="scaffold into this directory instead of a temporary one",
+    )
+    eval_run.add_argument(
+        "--keep",
+        action="store_true",
+        help="keep the temporary workspace after the run",
+    )
+    eval_run.add_argument(
+        "--timeout",
+        type=int,
+        help="wall-clock cap for this run in seconds (default: task timeout)",
+    )
+    eval_run.add_argument(
+        "--results",
+        help="result store path (default: EVAL_RESULTS_PATH)",
+    )
+    eval_run.set_defaults(eval_handler=_cmd_eval_run)
+
+    eval_results = eval_sub.add_parser("results", help="show recorded evaluation results")
+    eval_results.add_argument(
+        "--model",
+        help="only results for this model identifier",
+    )
+    eval_results.add_argument(
+        "--results",
+        help="result store path (default: EVAL_RESULTS_PATH)",
+    )
+    eval_results.set_defaults(eval_handler=_cmd_eval_results)
+
+    eval_compare = eval_sub.add_parser("compare", help="compare pass rates across models")
+    eval_compare.add_argument(
+        "--results",
+        help="result store path (default: EVAL_RESULTS_PATH)",
+    )
+    eval_compare.set_defaults(eval_handler=_cmd_eval_compare)
     return parser
 
 
@@ -228,6 +324,87 @@ async def _cmd_test(
     )
 
 
+async def _cmd_memory_add(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    assert state is not None
+    return await commands.cmd_memory_add(
+        ctx,
+        repo=repo,
+        state=state,
+        content=" ".join(args.content),
+        kind=args.kind,
+    )
+
+
+async def _cmd_memory_list(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    assert state is not None
+    return await commands.cmd_memory_list(
+        ctx,
+        repo=repo,
+        state=state,
+        kind=args.kind,
+        limit=args.limit,
+    )
+
+
+async def _cmd_memory_recall(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    assert state is not None
+    return await commands.cmd_memory_recall(
+        ctx,
+        repo=repo,
+        state=state,
+        query=" ".join(args.query),
+        limit=args.limit,
+    )
+
+
+async def _cmd_memory_clear(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    assert state is not None
+    return await commands.cmd_memory_clear(ctx, repo=repo, state=state, yes=args.yes)
+
+
+async def _cmd_eval_list(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    return await commands.cmd_eval_list(ctx, repo=repo)
+
+
+async def _cmd_eval_run(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    return await commands.cmd_eval_run(
+        ctx,
+        task_id=args.task_id,
+        workspace=args.workspace,
+        keep=args.keep,
+        timeout=args.timeout,
+        results_path=args.results,
+    )
+
+
+async def _cmd_eval_results(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    return await commands.cmd_eval_results(
+        ctx,
+        model=args.model,
+        results_path=args.results,
+    )
+
+
+async def _cmd_eval_compare(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    return await commands.cmd_eval_compare(ctx, results_path=args.results)
+
+
 async def arun(argv: Sequence[str] | None, ctx: CliContext) -> int:
     """Run the CLI with ``argv`` against ``ctx``, returning the exit code.
 
@@ -236,11 +413,21 @@ async def arun(argv: Sequence[str] | None, ctx: CliContext) -> int:
     """
     args = build_parser().parse_args(argv)
     try:
-        repo = await find_repo_root(Path.cwd())
-        state = None if args.command == "init" else load_state(repo)
-        if state is None and args.command != "init":
-            raise CliError(f"no binding for {repo} — run `engineer init` first")
-        return await args.handler(ctx, args, repo, state)
+        if args.command == "eval":
+            repo = Path.cwd()
+            state = None
+        else:
+            repo = await find_repo_root(Path.cwd())
+            state = None if args.command == "init" else load_state(repo)
+            if state is None and args.command != "init":
+                raise CliError(f"no binding for {repo} — run `engineer init` first")
+        handler = (
+            getattr(args, "handler", None)
+            or getattr(args, "memory_handler", None)
+            or getattr(args, "eval_handler", None)
+        )
+        assert handler is not None, "every subcommand must set a handler"
+        return await handler(ctx, args, repo, state)
     except CliError as exc:
         ctx.console.print(f"[red]error[/] {exc}")
         return 1

@@ -38,7 +38,7 @@ async def _clean_tables(container: Container) -> AsyncIterator[None]:
     async with container.engine.begin() as connection:
         await connection.execute(
             text(
-                "TRUNCATE TABLE messages, tasks, code_chunks, sessions, workspaces, users "
-                "RESTART IDENTITY CASCADE"
+                "TRUNCATE TABLE messages, tasks, code_chunks, memory_entries, "
+                "sessions, workspaces, users RESTART IDENTITY CASCADE"
             )
         )

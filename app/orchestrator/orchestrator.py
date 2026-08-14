@@ -25,6 +25,7 @@ from app.database.repositories.task import TaskRepository
 from app.executor.executor import ToolExecutor
 from app.llm.messages import ChatMessage, ChatRole, ToolRequest
 from app.llm.protocol import LLMProvider
+from app.memory.service import MemoryService, format_memory_block
 from app.orchestrator.broker import EventBroker
 from app.orchestrator.cancellation import CancellationRegistry, TaskCancelled
 from app.retrieval.context import ContextAssembler, format_context
@@ -365,22 +366,32 @@ class Orchestrator:
         session: AsyncSession,
         task: Task,
     ) -> Sequence[ChatMessage]:
-        """Retrieve a bounded context window for the task's goal.
+        """Assemble durable memory + retrieved context for the task's goal.
 
-        Returns an empty sequence when retrieval is disabled or the workspace
-        has no matching chunks, so the agent loop runs exactly as before.
+        Returns an empty sequence when both memory recall and retrieval are
+        disabled or produce nothing, so the agent loop runs exactly as before.
         """
+        messages: list[ChatMessage] = []
+        if self._settings.memory_enabled:
+            memory = await MemoryService.from_session(session).recall(
+                task.session.workspace.id,
+                task.goal,
+                limit=self._settings.memory_max_entries,
+            )
+            block = format_memory_block(memory)
+            if block:
+                messages.append(ChatMessage(role=ChatRole.USER, content=block))
         if not self._settings.retrieval_enabled:
-            return ()
+            return tuple(messages)
         window = await ContextAssembler.from_session(
             session,
             max_chunks=self._settings.retrieval_max_chunks,
             max_chars=self._settings.retrieval_max_chars,
         ).assemble(task.session.workspace.id, task.goal)
         text = format_context(window)
-        if not text:
-            return ()
-        return [ChatMessage(role=ChatRole.USER, content=text)]
+        if text:
+            messages.append(ChatMessage(role=ChatRole.USER, content=text))
+        return tuple(messages)
 
     async def _assemble_initial_messages(
         self,

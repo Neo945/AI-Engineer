@@ -95,9 +95,8 @@ async def change_password(
     db: SessionDep,
 ) -> User:
     """Replace the authenticated user's password after verifying the current one."""
-    if (
-        current_user.hashed_password is None
-        or not verify_password(body.current_password, current_user.hashed_password)
+    if current_user.hashed_password is None or not verify_password(
+        body.current_password, current_user.hashed_password
     ):
         raise HTTPException(status_code=400, detail="current password is incorrect")
     current_user.hashed_password = hash_password(body.new_password)

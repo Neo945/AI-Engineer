@@ -152,8 +152,7 @@ def apply_unified_diff(content: str, diff: str) -> tuple[str, AppliedEdit]:
         if start is None:
             expectation = "\n".join(hunk.old_block[:5])
             raise PatchError(
-                "diff does not match the file near line "
-                f"{hunk.old_start}:\n{expectation}"
+                f"diff does not match the file near line {hunk.old_start}:\n{expectation}"
             )
         lines[start : start + hunk.old_count] = hunk.new_block
         delta = hunk.new_count - hunk.old_count
