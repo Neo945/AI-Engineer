@@ -28,6 +28,15 @@ from app.agents.base import DEFAULT_MAX_STEPS, LoopAgent
 from app.agents.pipeline import REVIEWER_PROMPT
 from app.agents.planning import TaskPlan, format_plan
 from app.agents.repair import RepairAgent
+from app.analysis import (
+    ANALYSIS_PROMPT,
+    build_analysis_seed,
+    parse_analysis_report,
+    render_analysis,
+    render_scan,
+    scan_distributed_systems,
+    scan_summary,
+)
 from app.architecture import (
     ARCHITECTURE_PROMPT,
     build_architecture_seed,
@@ -1045,6 +1054,49 @@ async def cmd_design(
             raise CliError(_llm_failure_hint(exc)) from exc
         report = parse_design_report(response.content)
         ctx.console.print(render_design(report))
+        return 0
+    finally:
+        if llm_owned:
+            await llm.close()
+
+
+async def cmd_analyze(
+    ctx: CliContext,
+    *,
+    repo: Path,
+    state: WorkspaceState | None,
+    scan_only: bool = False,
+    llm: LLMProvider | None = None,
+) -> int:
+    """Analyze the workspace's distributed-systems posture.
+
+    The deterministic concern scan (sync/async HTTP, retries, idempotency,
+    concurrency, locking, caching, timeouts, circuit breakers, messaging) is
+    always run and printed. Unless ``scan_only`` is set, the evidence summary
+    is then handed to the LLM as a staff distributed-systems engineer; its
+    reply is parsed into a structured :class:`AnalysisReport` and rendered.
+    No sandbox or write access is involved.
+    """
+    scan = scan_distributed_systems(repo)
+    ctx.console.print(render_scan(scan))
+    if scan_only:
+        return 0
+    llm_owned = llm is None
+    if llm is None:
+        llm = _build_llm(ctx)
+    try:
+        try:
+            response = await llm.complete(
+                [ChatMessage(role=ChatRole.USER, content=build_analysis_seed(scan_summary(scan)))],
+                tools=[],
+                system=ANALYSIS_PROMPT,
+                max_tokens=ctx.settings.llm_max_tokens,
+                temperature=ctx.settings.llm_temperature,
+            )
+        except Exception as exc:
+            raise CliError(_llm_failure_hint(exc)) from exc
+        report = parse_analysis_report(response.content)
+        ctx.console.print(render_analysis(report))
         return 0
     finally:
         if llm_owned:

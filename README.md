@@ -5,7 +5,7 @@ plans work, edits files, runs commands and tests, reviews its own output,
 and deploys — the architecture lineage of Cursor Agent, Claude Code, Devin,
 and GitHub Copilot Workspace.
 
-**Status:** Phase 14 (review/audit modes) complete. The provider-agnostic
+**Status:** Phase 17 (distributed-systems analysis) complete. The provider-agnostic
 LLM abstraction (Anthropic, OpenAI, OpenAI-compatible local backends),
 LangGraph agents, the orchestrator, and the gateway task API exist and are
 tested. Tasks run **asynchronously** (`POST /sessions/{id}/tasks` returns
@@ -210,6 +210,25 @@ and risks. Rendering is Markdown; Mermaid diagrams are emitted in fenced
 ```mermaid``` blocks. Parsing degrades gracefully: a prose reply still yields
 a summary and any fenced Mermaid diagrams are recovered.
 
+## Distributed-systems analysis
+
+`engineer analyze` assesses a bound workspace's distributed-systems posture.
+It first runs a deterministic concern scanner over the source files (blocking
+and async HTTP, retries/backoff, idempotency, concurrency, locking, caching,
+timeouts, circuit breakers, and messaging), printing every hit with its file,
+line, and matched line:
+
+```bash
+engineer analyze               # deterministic scan + LLM interpretation
+engineer analyze --scan-only   # just the deterministic scan, no LLM
+```
+
+Unless `--scan-only` is passed, the evidence summary seeds the LLM as a staff
+distributed-systems engineer, which returns a JSON report with a summary,
+structured findings (severity/file/line/problem/reason/fix, matching the
+review and audit modes), and recommendations. Parsing degrades gracefully: a
+prose reply still yields a summary and any recoverable findings.
+
 ## Git workflow
 
 Agents can drive the repository themselves: `git_log`, `git_branch`,
@@ -263,3 +282,4 @@ make test-unit  # unit tests only, no infra required
 | `audit`          | staff-engineer production-readiness scoring          | 14    |
 | `architecture`   | dependency graph + LLM architecture analysis         | 15    |
 | `design`         | system-design mode with Mermaid diagrams             | 16    |
+| `analysis`       | distributed-systems concern scan + LLM analysis      | 17    |

@@ -93,8 +93,8 @@ Supplementary rows (not in the required list but material gaps):
 | Observability         | **Missing.** structlog only. | OTel traces, metrics (LLM/token/latency/cost/tool calls/task success), alerts. | P1 |
 | Evaluation framework  | **Missing.** `app/evals/__init__.py` stub. | Headless benchmark tasks (fix auth bug, add endpoint, add migration, fix test, optimize query, find security issue); store results; model comparison. | P1 |
 | Auth / workspace mgmt | **Missing.** `users` table + `UserRepository` exist; no endpoints. | Register/login/refresh/logout/me; user-scoped workspaces and sessions; ownership checks (was "Phase 9"). | P1 |
-| System design mode    | **Missing.** | `engineer design "…"` → architecture, APIs, data/event model, caching, failure handling, scaling, observability, Mermaid diagrams. | P1 |
-| Distributed systems analysis | **Missing.** | Detect sync deps, async flows, retries, idempotency, race conditions, locks, caching, bottlenecks, timeouts, circuit breakers. | P1 |
+| System design mode    | **Done (P1).** `engineer design "…"` → architecture, APIs, data/event model, caching, failure handling, scaling, observability, Mermaid diagrams. | — | P1 |
+| Distributed systems analysis | **Done (P1).** `engineer analyze` scans for sync/async HTTP, retries, idempotency, concurrency, locking, caching, timeouts, circuit breakers, messaging; `--scan-only` prints the deterministic evidence, otherwise the LLM produces findings + recommendations. | — | P1 |
 | Legacy modernization  | **Missing.** | `engineer modernize` → migration plan, risk assessment, rollback strategy; approval before execution. | P2 |
 | MCP integration       | **Missing.** Tool layer is closed. | Design tool layer so MCP-compatible tools can be added (GitHub, Jira, DBs, cloud). | P2 |
 | Web UI / extension    | **Missing.** | React frontend / VS Code extension consuming the same gateway. | P2 |

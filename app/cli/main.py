@@ -199,6 +199,17 @@ def build_parser() -> ArgumentParser:
     )
     design.set_defaults(handler=_cmd_design)
 
+    analyze = subparsers.add_parser(
+        "analyze",
+        help="assess the workspace's distributed-systems posture",
+    )
+    analyze.add_argument(
+        "--scan-only",
+        action="store_true",
+        help="run the deterministic concern scan without the LLM",
+    )
+    analyze.set_defaults(handler=_cmd_analyze)
+
     test = subparsers.add_parser("test", help="run the project's test suite")
     test.add_argument(
         "--command",
@@ -459,6 +470,17 @@ async def _cmd_design(
         repo=repo,
         state=state,
         goal=" ".join(args.goal),
+    )
+
+
+async def _cmd_analyze(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    return await commands.cmd_analyze(
+        ctx,
+        repo=repo,
+        state=state,
+        scan_only=args.scan_only,
     )
 
 
