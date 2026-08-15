@@ -28,6 +28,18 @@ from app.agents.base import DEFAULT_MAX_STEPS, LoopAgent
 from app.agents.pipeline import REVIEWER_PROMPT
 from app.agents.planning import TaskPlan, format_plan
 from app.agents.repair import RepairAgent
+from app.architecture import (
+    ARCHITECTURE_PROMPT,
+    build_architecture_seed,
+    build_file_graph,
+    graph_summary,
+    parse_architecture_report,
+    render_architecture,
+    render_graph_mermaid,
+    render_graph_text,
+    render_node_mermaid,
+    render_node_text,
+)
 from app.audit import AUDIT_PROMPT, AuditReport, parse_audit_report, resolve_verdict
 from app.cli.context import (
     LLM_UNCONFIGURED_HINT,
@@ -911,6 +923,87 @@ async def cmd_audit(
         return 0 if verdict == "PASS" else 1
     finally:
         await executor.sandboxes.close()
+        if llm_owned:
+            await llm.close()
+
+
+async def cmd_graph(
+    ctx: CliContext,
+    *,
+    repo: Path,
+    state: WorkspaceState | None,
+    node: str | None = None,
+    mermaid: bool = False,
+    include_unresolved: bool = False,
+    max_nodes: int = 200,
+    depth: int = 1,
+) -> int:
+    """Render the workspace's deterministic file-level dependency graph.
+
+    Without ``node`` the whole graph is rendered as a text report (or a
+    Mermaid flowchart with ``--mermaid``). With ``node`` only that file's
+    neighborhood is shown, which keeps large repositories readable.
+    """
+    graph = build_file_graph(repo)
+    if node is not None:
+        try:
+            body = (
+                render_node_mermaid(graph, node, depth=depth)
+                if mermaid
+                else render_node_text(graph, node, depth=depth)
+            )
+        except ValueError as exc:
+            raise CliError(str(exc)) from exc
+    else:
+        body = (
+            render_graph_mermaid(graph, max_nodes=max_nodes, include_unresolved=include_unresolved)
+            if mermaid
+            else render_graph_text(graph, max_nodes=max_nodes)
+        )
+    ctx.console.print(body)
+    return 0
+
+
+async def cmd_arch(
+    ctx: CliContext,
+    *,
+    repo: Path,
+    state: WorkspaceState | None,
+    mermaid: bool = False,
+    llm: LLMProvider | None = None,
+) -> int:
+    """Analyze the repository architecture, seeded by the dependency graph.
+
+    The deterministic graph summary (files, edges, hubs, cycles, orphans,
+    unresolved imports) is handed to the LLM as a staff architect; its reply
+    is parsed into a structured :class:`ArchitectureReport` and rendered.
+    No sandbox or write access is involved.
+    """
+    llm_owned = llm is None
+    if llm is None:
+        llm = _build_llm(ctx)
+    try:
+        graph = build_file_graph(repo)
+        seed = build_architecture_seed(graph_summary(graph))
+        if mermaid:
+            seed += (
+                "\n\nAlso include a valid Mermaid flowchart of the main "
+                "components in the mermaid field of your JSON report."
+            )
+        try:
+            response = await llm.complete(
+                [ChatMessage(role=ChatRole.USER, content=seed)],
+                tools=[],
+                system=ARCHITECTURE_PROMPT,
+                max_tokens=ctx.settings.llm_max_tokens,
+                temperature=ctx.settings.llm_temperature,
+            )
+        except Exception as exc:
+            raise CliError(_llm_failure_hint(exc)) from exc
+        report = parse_architecture_report(response.content)
+        ctx.console.print(render_architecture(report))
+        return 0
+    finally:
         if llm_owned:
             await llm.close()
 

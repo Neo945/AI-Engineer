@@ -41,7 +41,12 @@ description is always saved under `.engineer/pr-<branch>.md`). A
 production-readiness dimensions (correctness, security, performance,
 maintainability, testability, observability, deployment) out of 100 with
 cited evidence, and derives a PASS/CHANGES_NEEDED verdict from the scores
-when the model omits one.
+when the model omits one. An **architecture analysis** package builds a
+deterministic file-level dependency graph from the workspace's source files
+(`engineer graph` renders it as text or a Mermaid flowchart, with per-file
+neighborhood focus) and seeds the LLM with that graph for a staff-architect
+write-up of components, layers, key files, and recommendations
+(`engineer arch`).
 
 ## Architecture
 
@@ -156,6 +161,34 @@ same structured **findings** used by `engineer review`.
   numbers, short quotes) and malformed entries are skipped rather than
   failing the audit.
 
+## Architecture analysis
+
+`engineer graph` renders a deterministic file-level dependency graph built
+from the workspace's source files (Python via AST, plus TypeScript,
+JavaScript, Go, Rust, Java, C#, C, C++ via import/require/using/include
+patterns):
+
+```bash
+engineer graph                          # text report: files, edges, hubs, cycles
+engineer graph --mermaid                # Mermaid flowchart
+engineer graph app/core/config.py       # one file's dependencies, both directions
+engineer graph --mermaid --depth 2 app/orchestrator/orchestrator.py
+engineer arch                           # LLM analysis seeded by the graph
+engineer arch --mermaid                 # ... and ask it to include a component diagram
+```
+
+- **Edges are membership-checked** — an import only becomes an edge when the
+  target maps to a known file, so sloppy heuristics cannot invent edges;
+  unresolved imports are collected as external dependencies instead.
+- **Metrics** — most depended-on files (hubs), dependency cycles (Tarjan
+  strongly-connected components), orphan files, per-language counts, and
+  per-file dependency depth (layers) are computed and shown.
+- **`engineer arch`** — the graph summary is handed to the LLM as a staff
+  architect, which returns a JSON report: summary, components (name/files/
+  responsibility), ordered layers, key files, and recommendations. Parsing
+  degrades gracefully — a prose reply still yields a summary, and malformed
+  entries are skipped.
+
 ## Git workflow
 
 Agents can drive the repository themselves: `git_log`, `git_branch`,
@@ -207,3 +240,4 @@ make test-unit  # unit tests only, no infra required
 | `monitoring`     | OTel traces + metrics, no-op by default              | 12    |
 | `git`            | git tools, dirty-tree protection, PR/commit drafting | 13    |
 | `audit`          | staff-engineer production-readiness scoring          | 14    |
+| `architecture`   | dependency graph + LLM architecture analysis         | 15    |

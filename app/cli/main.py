@@ -37,6 +37,9 @@ examples:
   engineer test --fix               run tests and repair failures, then re-run
   engineer review                   structured review of the working tree
   engineer audit                    staff-engineer production-readiness audit
+  engineer graph                    render the dependency graph (text or --mermaid)
+  engineer graph app/core/config.py focus on one file's dependencies
+  engineer arch                     LLM architecture analysis seeded by the graph
   engineer memory add "pins are async" --kind decision
   engineer memory list --limit 20
   engineer memory recall "why sqlite?"
@@ -141,6 +144,48 @@ def build_parser() -> ArgumentParser:
         help="upper bound on auditor LLM calls (default: 8)",
     )
     audit.set_defaults(handler=_cmd_audit)
+
+    graph = subparsers.add_parser("graph", help="render the workspace's dependency graph")
+    graph.add_argument(
+        "node",
+        nargs="?",
+        default=None,
+        help="focus on this file's neighborhood instead of the whole graph",
+    )
+    graph.add_argument(
+        "--mermaid",
+        action="store_true",
+        help="emit a Mermaid flowchart instead of the text report",
+    )
+    graph.add_argument(
+        "--include-unresolved",
+        action="store_true",
+        help="add dashed stub nodes for external imports (with --mermaid)",
+    )
+    graph.add_argument(
+        "--max-nodes",
+        type=int,
+        default=200,
+        help="cap on file nodes in the output (default: 200)",
+    )
+    graph.add_argument(
+        "--depth",
+        type=int,
+        default=1,
+        help="edge-hops to include around a focus node (default: 1)",
+    )
+    graph.set_defaults(handler=_cmd_graph)
+
+    arch = subparsers.add_parser(
+        "arch",
+        help="analyze the repository architecture with the LLM",
+    )
+    arch.add_argument(
+        "--mermaid",
+        action="store_true",
+        help="ask the model to include a Mermaid component diagram",
+    )
+    arch.set_defaults(handler=_cmd_arch)
 
     test = subparsers.add_parser("test", help="run the project's test suite")
     test.add_argument(
@@ -365,6 +410,32 @@ async def _cmd_audit(
         state=state,
         ref=args.ref,
         max_steps=args.max_steps,
+    )
+
+
+async def _cmd_graph(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    return await commands.cmd_graph(
+        ctx,
+        repo=repo,
+        state=state,
+        node=args.node,
+        mermaid=args.mermaid,
+        include_unresolved=args.include_unresolved,
+        max_nodes=args.max_nodes,
+        depth=args.depth,
+    )
+
+
+async def _cmd_arch(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    return await commands.cmd_arch(
+        ctx,
+        repo=repo,
+        state=state,
+        mermaid=args.mermaid,
     )
 
 
