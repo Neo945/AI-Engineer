@@ -22,6 +22,7 @@ from app.cli.commands import (
     _snippet,
     cmd_commit,
     cmd_diff,
+    cmd_pr,
     cmd_review,
     cmd_run,
     cmd_test,
@@ -840,3 +841,190 @@ async def test_cmd_review_unconfigured_llm_is_friendly(
 
     with pytest.raises(CliError, match="LLM is not configured"):
         await cmd_review(ctx, repo=repo, state=None, executor=_StubExecutor(repo))
+
+
+class _TypedConsole(Console):
+    """A console whose ``input`` returns a fixed value (no stdin needed)."""
+
+    def __init__(self, value: str, buffer: StringIO | None = None) -> None:
+        super().__init__(file=buffer or StringIO(), width=200, highlight=False)
+        self._value = value
+
+    def input(self, prompt: str = "", *, password: bool = False, stream=None) -> str:
+        return self._value
+
+
+def test_parser_pr_and_commit_generate_defaults() -> None:
+    parser = build_parser()
+
+    pr = parser.parse_args(["pr"])
+    assert pr.command == "pr"
+    assert pr.base is None
+    assert pr.branch is None
+    assert pr.remote == "origin"
+    assert pr.draft is False
+    assert pr.title is None
+    assert pr.yes is False
+
+    filled = parser.parse_args(
+        [
+            "pr",
+            "--base",
+            "develop",
+            "--branch",
+            "feat/x",
+            "--remote",
+            "upstream",
+            "--draft",
+            "--title",
+            "wip",
+            "-y",
+        ]
+    )
+    assert filled.base == "develop"
+    assert filled.branch == "feat/x"
+    assert filled.remote == "upstream"
+    assert filled.draft is True
+    assert filled.title == "wip"
+    assert filled.yes is True
+
+    commit = parser.parse_args(["commit", "--generate"])
+    assert commit.generate is True
+    assert parser.parse_args(["commit", "-m", "m"]).generate is False
+
+
+async def test_cmd_commit_generate_uses_llm_drafted_message(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    (repo / "file.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    console, _ = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    llm = FakeLLM([_response("feat: add a third line")])
+
+    code = await cmd_commit(
+        ctx, repo=repo, state=None, message=None, yes=True, generate=True, llm=llm
+    )
+
+    assert code == 0
+    assert len(llm.calls) == 1
+    assert _git(repo, "log", "-1", "--format=%s").strip() == "feat: add a third line"
+
+
+async def test_cmd_commit_generate_falls_back_to_prompt_when_unconfigured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    (repo / "file.txt").write_text("one\nchanged\n", encoding="utf-8")
+
+    def _boom(_settings: Settings) -> LLMResponse:
+        raise RuntimeError("no provider")
+
+    monkeypatch.setattr("app.cli.commands.build_llm_client", _boom)
+    buffer = StringIO()
+    ctx = CliContext(console=_TypedConsole("chore: manual edit", buffer), settings=_settings())
+
+    code = await cmd_commit(ctx, repo=repo, state=None, message=None, yes=True, generate=True)
+
+    assert code == 0
+    assert _git(repo, "log", "-1", "--format=%s").strip() == "chore: manual edit"
+
+
+async def _no_gh(*_args: object, **_kwargs: object) -> bool:
+    return False
+
+
+async def test_cmd_pr_generates_llm_description_and_saves_body(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "file.txt").write_text("one\ntwo\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "feat: add two")
+
+    monkeypatch.setattr("app.cli.commands.Confirm.ask", lambda *a, **k: True)
+    monkeypatch.setattr("app.cli.commands._gh_pr_create", _no_gh)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    llm = FakeLLM(
+        [
+            _response(
+                '{"title": "feat: add two", "summary": "Adds a second line.", '
+                '"tests": "manual", "risks": [], "migration": null}'
+            )
+        ]
+    )
+
+    code = await cmd_pr(
+        ctx,
+        repo=repo,
+        state=None,
+        base="main",
+        branch="feature",
+        remote="origin",
+        yes=True,
+        llm=llm,
+    )
+
+    assert code == 0
+    assert len(llm.calls) == 1
+    out = buffer.getvalue()
+    assert "feat: add two" in out
+    assert "Adds a second line." in out
+    body = (repo / ".engineer" / "pr-feature.md").read_text()
+    assert "feat: add two" in body
+    assert "Adds a second line." in body
+
+
+async def test_cmd_pr_falls_back_without_remote_or_llm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "file.txt").write_text("one\ntwo\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "feat: add two")
+
+    def _boom(_settings: Settings) -> LLMResponse:
+        raise RuntimeError("no provider")
+
+    monkeypatch.setattr("app.cli.commands.build_llm_client", _boom)
+    monkeypatch.setattr("app.cli.commands.Confirm.ask", lambda *a, **k: True)
+    monkeypatch.setattr("app.cli.commands._gh_pr_create", _no_gh)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+
+    code = await cmd_pr(
+        ctx, repo=repo, state=None, base="main", branch="feature", remote="origin", yes=True
+    )
+
+    assert code == 0
+    out = buffer.getvalue()
+    assert "no git remote configured" in out
+    assert "PR body saved to" in out
+
+
+async def test_cmd_pr_requires_a_feature_branch(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, _ = _console()
+    ctx = CliContext(console=console, settings=_settings())
+
+    with pytest.raises(CliError, match="create a feature branch"):
+        await cmd_pr(ctx, repo=repo, state=None, base="main", yes=True)
+
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "file.txt").write_text("one\ntwo\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "feat: add two")
+
+    with pytest.raises(CliError, match="not checked out"):
+        await cmd_pr(ctx, repo=repo, state=None, base="main", branch="other", yes=True)
+
+
+async def test_cmd_pr_rejects_no_commits(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _git(repo, "checkout", "-q", "-b", "feature")
+    console, _ = _console()
+    ctx = CliContext(console=console, settings=_settings())
+
+    with pytest.raises(CliError, match="no commits"):
+        await cmd_pr(ctx, repo=repo, state=None, base="main", branch="feature", yes=True)

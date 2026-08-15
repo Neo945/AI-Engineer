@@ -47,6 +47,9 @@ examples:
   engineer tasks --limit 20
   engineer diff HEAD~1
   engineer commit -m "fix: ..."
+  engineer commit --generate          LLM-draft the commit message from the diff
+  engineer pr                         prepare a PR, push the branch, and open it with gh
+  engineer pr --draft --title "wip"   open a draft PR with an explicit title
 """
 
 
@@ -97,8 +100,22 @@ def build_parser() -> ArgumentParser:
 
     commit = subparsers.add_parser("commit", help="stage the working tree and commit")
     commit.add_argument("-m", "--message", help="commit message (prompts when omitted)")
+    commit.add_argument(
+        "--generate",
+        action="store_true",
+        help="draft the commit message from the diff using the LLM",
+    )
     commit.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
     commit.set_defaults(handler=_cmd_commit)
+
+    pr = subparsers.add_parser("pr", help="prepare a pull request and open it with gh")
+    pr.add_argument("--base", help="base branch (auto-detected from the remote when omitted)")
+    pr.add_argument("--branch", help="head branch (defaults to the checked-out branch)")
+    pr.add_argument("--remote", default="origin", help="push target remote (default: origin)")
+    pr.add_argument("--draft", action="store_true", help="open the PR as a draft")
+    pr.add_argument("--title", help="override the generated PR title")
+    pr.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
+    pr.set_defaults(handler=_cmd_pr)
 
     cancel = subparsers.add_parser("cancel", help="cancel a running task")
     cancel.add_argument("task_id", help="the task id")
@@ -289,6 +306,23 @@ async def _cmd_commit(
         state=state,
         message=args.message,
         yes=args.yes,
+        generate=args.generate,
+    )
+
+
+async def _cmd_pr(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    return await commands.cmd_pr(
+        ctx,
+        repo=repo,
+        state=state,
+        base=args.base,
+        branch=args.branch,
+        remote=args.remote,
+        draft=args.draft,
+        yes=args.yes,
+        title=args.title,
     )
 
 

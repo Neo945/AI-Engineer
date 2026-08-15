@@ -54,6 +54,8 @@ from app.evals import (
 from app.executor.executor import ToolExecutor, _detect_test_command
 from app.executor.git import GitOutput, run_git
 from app.executor.test_parser import TestReport, format_report
+from app.git.commit import generate_commit_message
+from app.git.pr import PRDescription, generate_pr_description, render_pr
 from app.llm.factory import build_llm_client
 from app.llm.messages import ChatMessage, ChatRole
 from app.llm.protocol import LLMProvider
@@ -492,11 +494,34 @@ async def cmd_commit(
     state: WorkspaceState | None,
     message: str | None,
     yes: bool,
+    generate: bool = False,
+    llm: LLMProvider | None = None,
 ) -> int:
-    """Stage the working tree and create a commit after confirmation."""
+    """Stage the working tree and create a commit after confirmation.
+
+    With ``generate`` the commit message is drafted by the LLM from the
+    working-tree diff (falling back to a prompt when the model is
+    unconfigured); an explicit ``message`` always wins.
+    """
     stat = await _git(ctx, repo, ["diff", "--stat"])
     if stat.exit_code != 0:
         raise CliError(stat.stderr.strip() or "git diff --stat failed")
+    llm_owned = False
+    if message is None and generate:
+        if llm is None:
+            try:
+                llm = _build_llm(ctx)
+                llm_owned = True
+            except CliError:
+                llm = None
+        if llm is not None:
+            diff = await _git(ctx, repo, ["diff", "--no-color", "HEAD"])
+            if diff.exit_code != 0:
+                raise CliError(diff.stderr.strip() or "git diff failed")
+            try:
+                message = await generate_commit_message(llm, diff=diff.stdout)
+            except Exception as exc:
+                raise CliError(_llm_failure_hint(exc)) from exc
     if message is None:
         message = ctx.console.input("commit message: ").strip()
         if not message:
@@ -504,6 +529,8 @@ async def cmd_commit(
     if not yes:
         if stat.stdout.strip():
             ctx.console.print(stat.stdout.strip())
+        if message is not None and generate and llm is not None:
+            ctx.console.print(f"[dim]message:[/] {_short(message, 160)}")
         if not Confirm.ask("Commit these changes?", default=False):
             ctx.console.print("aborted")
             return 1
@@ -515,7 +542,209 @@ async def cmd_commit(
     if done.exit_code != 0:
         raise CliError(done.stderr.strip() or "git commit failed")
     ctx.console.print(f"[green]committed[/] {done.stdout.strip()}")
+    if llm_owned:
+        assert llm is not None
+        await llm.close()
     return 0
+
+
+async def cmd_pr(
+    ctx: CliContext,
+    *,
+    repo: Path,
+    state: WorkspaceState | None,
+    base: str | None = None,
+    branch: str | None = None,
+    remote: str = "origin",
+    draft: bool = False,
+    yes: bool = False,
+    title: str | None = None,
+    llm: LLMProvider | None = None,
+) -> int:
+    """Prepare a pull request for the current branch and try to open it.
+
+    Generates a title/body from the committed diff (LLM-drafted when
+    configured), pushes the branch to ``remote``, and opens the PR with
+    ``gh`` when available. The description is always saved under
+    ``.engineer/pr-<branch>.md`` so it can be opened manually.
+    """
+    base_ref = await _default_branch(ctx, repo) if base is None else base
+    current = await _git(ctx, repo, ["symbolic-ref", "--short", "HEAD"])
+    if current.exit_code != 0:
+        raise CliError(current.stderr.strip() or "not on a branch")
+    branch_name = current.stdout.strip()
+    if branch is not None:
+        if branch != branch_name:
+            raise CliError(
+                f"branch {branch!r} is not checked out; run `engineer git checkout "
+                f"{branch}` or omit --branch"
+            )
+        branch_name = branch
+    if branch_name == base_ref:
+        raise CliError(
+            f"on the base branch {base_ref!r}; create a feature branch first (`--branch <name>`)"
+        )
+
+    log = await _git(ctx, repo, ["log", "--oneline", f"{base_ref}..HEAD"])
+    if log.exit_code != 0:
+        raise CliError(log.stderr.strip() or f"cannot compare {branch_name} against {base_ref}")
+    commit_lines = [line for line in log.stdout.splitlines() if line.strip()]
+    if not commit_lines:
+        raise CliError(f"no commits on {branch_name} beyond {base_ref}")
+
+    diff = await _git(ctx, repo, ["diff", "--no-color", f"{base_ref}...HEAD"])
+    if diff.exit_code != 0:
+        raise CliError(diff.stderr.strip() or f"cannot diff {branch_name} against {base_ref}")
+
+    description = await _pr_description(
+        ctx,
+        llm,
+        diff=diff.stdout,
+        commits=commit_lines,
+        base=base_ref,
+        branch=branch_name,
+        title=title,
+    )
+    body = render_pr(description)
+    title = f"[bold]{description.title}[/]"
+    ctx.console.print(Panel(title, title="pull request", border_style="cyan"))
+    if body:
+        ctx.console.print(Panel(body, border_style="dim"))
+    if not yes and not Confirm.ask("Open this pull request?", default=False):
+        ctx.console.print("aborted")
+        return 1
+
+    remotes = await _git(ctx, repo, ["remote"])
+    if remotes.exit_code != 0:
+        raise CliError(remotes.stderr.strip() or "git remote failed")
+    if remotes.stdout.strip():
+        pushed = await _git(ctx, repo, ["push", "-u", remote, branch_name])
+        if pushed.exit_code != 0:
+            ctx.console.print(f"[yellow]push failed[/] {pushed.stderr.strip()}")
+        else:
+            ctx.console.print(f"[green]pushed[/] {remote}/{branch_name}")
+    else:
+        ctx.console.print("[yellow]no git remote configured; skipping push[/]")
+
+    pr_body_path = repo / ".engineer" / f"pr-{branch_name}.md"
+    pr_body_path.parent.mkdir(parents=True, exist_ok=True)
+    pr_body_path.write_text(f"# {description.title}\n\n{body}\n", encoding="utf-8")
+
+    created = await _gh_pr_create(ctx, repo, base_ref, branch_name, description, draft=draft)
+    if created:
+        ctx.console.print("[green]pull request opened[/]")
+        return 0
+    ctx.console.print(f"[dim]PR body saved to {pr_body_path}[/]")
+    ctx.console.print(
+        f"[dim]open it manually: gh pr create --base {base_ref} --head {branch_name} "
+        f"--title {description.title!r} --body-file {pr_body_path}[/]"
+    )
+    return 0
+
+
+async def _default_branch(ctx: CliContext, repo: Path) -> str:
+    """Return the repository's default branch (remote HEAD, then main/master)."""
+    head = await _git(ctx, repo, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+    if head.exit_code == 0 and head.stdout.strip():
+        candidate = head.stdout.strip()
+        return candidate.split("/", 1)[1] if candidate.startswith("origin/") else candidate
+    for candidate in ("main", "master"):
+        check = await _git(ctx, repo, ["rev-parse", "--verify", "--quiet", candidate])
+        if check.exit_code == 0:
+            return candidate
+    raise CliError("cannot determine the default branch (expected 'main' or 'master')")
+
+
+async def _pr_description(
+    ctx: CliContext,
+    llm: LLMProvider | None,
+    *,
+    diff: str,
+    commits: list[str],
+    base: str,
+    branch: str,
+    title: str | None,
+) -> PRDescription:
+    """Generate the PR description, falling back to the commit list."""
+    llm_owned = llm is None
+    if llm is None:
+        try:
+            llm = _build_llm(ctx)
+            llm_owned = True
+        except CliError:
+            llm = None
+    if llm is not None:
+        try:
+            description = await generate_pr_description(
+                llm,
+                diff=diff,
+                commits=commits,
+                base=base,
+                branch=branch,
+            )
+        except Exception as exc:
+            raise CliError(_llm_failure_hint(exc)) from exc
+        if llm_owned:
+            await llm.close()
+        if title is not None:
+            return description.model_copy(update={"title": title})
+        return description
+    subject = commits[0].split(" ", 1)[-1] if commits else "changes"
+    summary = "\n".join(f"- {line}" for line in commits)
+    return PRDescription(
+        title=title or subject,
+        summary=f"{len(commits)} commit(s) on {branch} against {base}.\n\n{summary}",
+        tests="Not run",
+    )
+
+
+async def _gh_pr_create(
+    ctx: CliContext,
+    repo: Path,
+    base: str,
+    head: str,
+    description: PRDescription,
+    *,
+    draft: bool,
+) -> bool:
+    """Open the PR with ``gh``; return whether it was created."""
+    command = [
+        "gh",
+        "pr",
+        "create",
+        "--base",
+        base,
+        "--head",
+        head,
+        "--title",
+        description.title,
+        "--body",
+        render_pr(description),
+    ]
+    if draft:
+        command.append("--draft")
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=str(repo),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+    except FileNotFoundError:
+        ctx.console.print("[yellow]gh not found on PATH; PR not opened[/]")
+        return False
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        ctx.console.print("[yellow]gh timed out; PR not opened[/]")
+        return False
+    if process.returncode != 0:
+        detail = (stderr or stdout).decode("utf-8", errors="replace").strip()
+        ctx.console.print(f"[yellow]gh pr create failed[/] {detail or 'unknown error'}")
+        return False
+    ctx.console.print(stdout.decode("utf-8", errors="replace").strip())
+    return True
 
 
 async def cmd_cancel(ctx: CliContext, *, repo: Path, state: WorkspaceState, task_id: str) -> int:

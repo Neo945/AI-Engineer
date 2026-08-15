@@ -5,7 +5,7 @@ plans work, edits files, runs commands and tests, reviews its own output,
 and deploys — the architecture lineage of Cursor Agent, Claude Code, Devin,
 and GitHub Copilot Workspace.
 
-**Status:** Phase 12 (observability) complete. The provider-agnostic
+**Status:** Phase 13 (git workflow) complete. The provider-agnostic
 LLM abstraction (Anthropic, OpenAI, OpenAI-compatible local backends),
 LangGraph agents, the orchestrator, and the gateway task API exist and are
 tested. Tasks run **asynchronously** (`POST /sessions/{id}/tasks` returns
@@ -27,7 +27,16 @@ records JSONL results, and compares pass rates across models. OpenTelemetry
 **traces and metrics** (LLM calls, tool executions, task runs, HTTP
 requests) are emitted through a `monitoring` package that is a no-op by
 default — set `OTEL_ENABLED=true` and point `OTEL_EXPORTER_ENDPOINT` at a
-collector (e.g. Jaeger/Grafana) to export spans and metrics.
+collector (e.g. Jaeger/Grafana) to export spans and metrics. Agents get a
+full **git workflow**: `git_log`, `git_branch`, `git_checkout`, and
+`git_push` join the existing `git_status`/`git_diff`/`git_commit` tools,
+and a **pre-modification working-tree check** (on by default) snapshots the
+pre-existing uncommitted state on first mutation and refuses to touch or
+commit any path that was dirty before the session began. The CLI gains
+`engineer commit --generate` (LLM-drafted conventional commit messages)
+and `engineer pr`, which generates a PR title/body from the committed
+diff, pushes the branch, and opens the PR with `gh` (best-effort — the
+description is always saved under `.engineer/pr-<branch>.md`).
 
 ## Architecture
 
@@ -116,6 +125,30 @@ and a machine-readable **findings list**:
   printed even when the findings block is missing or malformed, so a sloppy
   reply never crashes the CLI.
 
+## Git workflow
+
+Agents can drive the repository themselves: `git_log`, `git_branch`,
+`git_checkout`, and `git_push` join `git_status`, `git_diff`, and
+`git_commit`. A **pre-modification working-tree check** is on by default
+(`git_protect_dirty_tree`): the executor snapshots which paths are
+uncommitted at the first mutation and refuses to write, edit, delete, move,
+or commit anything that was already dirty before the session began, so the
+agent can never clobber the user's in-flight work.
+
+```bash
+engineer commit -m "fix: ..."      # commit with an explicit message
+engineer commit --generate         # LLM-drafts a conventional message from the diff
+engineer pr                        # PR description + push + open with gh
+engineer pr --draft --title "wip"  # draft PR with an explicit title
+```
+
+`engineer pr` diffs the checked-out branch against the base (auto-detected
+from `origin/HEAD`, else `main`/`master`), has the LLM draft a title and
+body, pushes the branch, and tries to open the PR with `gh`. It degrades
+gracefully: without a remote, without `gh`, or without a configured LLM it
+prints a hint and saves the description to
+`.engineer/pr-<branch>.md` so the PR can be opened manually.
+
 ## Tooling
 
 ```bash
@@ -141,3 +174,4 @@ make test-unit  # unit tests only, no infra required
 | `llm`            | provider abstraction + context management            | 5     |
 | `evals`          | headless task harness                                | 11    |
 | `monitoring`     | OTel traces + metrics, no-op by default              | 12    |
+| `git`            | git tools, dirty-tree protection, PR/commit drafting | 13    |

@@ -19,7 +19,7 @@ from typing import cast
 from pydantic import BaseModel
 
 from app.core.config import Settings
-from app.executor.git import GitOutput, run_git
+from app.executor.git import GitOutput, is_valid_branch, parse_porcelain, run_git
 from app.executor.patch import PatchError, apply_unified_diff
 from app.executor.paths import PathTraversalError, resolve_within
 from app.executor.policy import CommandPolicy, CommandTier, policy_message
@@ -38,7 +38,14 @@ from app.tools.specs.filesystem import (
     SearchFilesArgs,
     WriteFileArgs,
 )
-from app.tools.specs.git import GitCommitArgs, GitDiffArgs
+from app.tools.specs.git import (
+    GitBranchArgs,
+    GitCheckoutArgs,
+    GitCommitArgs,
+    GitDiffArgs,
+    GitLogArgs,
+    GitPushArgs,
+)
 from app.tools.specs.terminal import TerminalRunArgs
 from app.tools.specs.tests import TestRunArgs
 
@@ -80,6 +87,7 @@ class ToolExecutor:
         mount_target: str = "/workspace",
         default_timeout_ms: int = 30_000,
         policy: CommandPolicy | None = None,
+        git_protect_dirty_tree: bool = True,
     ) -> None:
         self._workspace_dir = Path(os.path.realpath(workspace_dir))
         self._registry = registry
@@ -87,6 +95,8 @@ class ToolExecutor:
         self._mount_target = Path(mount_target)
         self._default_timeout_ms = default_timeout_ms
         self._policy = policy or CommandPolicy()
+        self._git_protect_dirty_tree = git_protect_dirty_tree
+        self._baseline_dirty: frozenset[str] | None = None
         self._register()
 
     @classmethod
@@ -120,6 +130,7 @@ class ToolExecutor:
             sandboxes=manager,
             default_timeout_ms=settings.sandbox_default_timeout_ms,
             policy=CommandPolicy.from_settings(settings),
+            git_protect_dirty_tree=settings.git_protect_dirty_tree,
         )
 
     @property
@@ -160,6 +171,10 @@ class ToolExecutor:
             ToolName.GIT_STATUS: self._git_status,
             ToolName.GIT_DIFF: self._git_diff,
             ToolName.GIT_COMMIT: self._git_commit,
+            ToolName.GIT_LOG: self._git_log,
+            ToolName.GIT_BRANCH: self._git_branch,
+            ToolName.GIT_CHECKOUT: self._git_checkout,
+            ToolName.GIT_PUSH: self._git_push,
         }
         for spec in ALL_SPECS:
             self._registry.register(
@@ -192,6 +207,8 @@ class ToolExecutor:
             path = resolve_within(self._workspace_dir, arguments.path)
         except PathTraversalError as exc:
             return self._fail(call, str(exc))
+        if error := await self._guard_dirty_path(call, path):
+            return self._fail(call, error)
         await asyncio.to_thread(_write_file, path, arguments.content)
         return self._ok(call, f"wrote {len(arguments.content)} bytes to {arguments.path}")
 
@@ -203,6 +220,8 @@ class ToolExecutor:
             return self._fail(call, str(exc))
         if not path.is_file():
             return self._fail(call, f"not a file: {arguments.path}")
+        if error := await self._guard_dirty_path(call, path):
+            return self._fail(call, error)
         content = await asyncio.to_thread(_read_text, path)
         try:
             new_content, edit = await asyncio.to_thread(apply_unified_diff, content, arguments.diff)
@@ -265,6 +284,8 @@ class ToolExecutor:
             return self._fail(call, "refusing to delete the workspace root")
         if not path.exists() and not path.is_symlink():
             return self._fail(call, f"no such file: {arguments.path}")
+        if error := await self._guard_dirty_path(call, path):
+            return self._fail(call, error)
         try:
             await asyncio.to_thread(_delete, path, arguments.recursive)
         except ValueError as exc:
@@ -282,6 +303,10 @@ class ToolExecutor:
             return self._fail(call, f"no such file: {arguments.source}")
         if destination == self._workspace_dir:
             return self._fail(call, "refusing to move onto the workspace root")
+        if error := await self._guard_dirty_path(call, source):
+            return self._fail(call, error)
+        if error := await self._guard_dirty_path(call, destination):
+            return self._fail(call, error)
         await asyncio.to_thread(_move, source, destination)
         return self._ok(call, f"moved {arguments.source} -> {arguments.destination}")
 
@@ -390,6 +415,80 @@ class ToolExecutor:
         )
         return self._git_result(call, output)
 
+    async def _git_log(self, call: ToolCall, args: BaseModel) -> ToolResult:
+        arguments = cast(GitLogArgs, args)
+        output = await run_git(
+            self._workspace_dir,
+            ["log", "--oneline", "--decorate", "-n", str(arguments.limit)],
+            stdin_data=None,
+            timeout_ms=self._default_timeout_ms,
+        )
+        return self._git_result(call, output)
+
+    async def _git_branch(self, call: ToolCall, args: BaseModel) -> ToolResult:
+        arguments = cast(GitBranchArgs, args)
+        if arguments.create:
+            if not is_valid_branch(arguments.create):
+                return self._fail(call, f"invalid branch name: {arguments.create!r}")
+            output = await run_git(
+                self._workspace_dir,
+                ["checkout", "-b", arguments.create],
+                stdin_data=None,
+                timeout_ms=self._default_timeout_ms,
+            )
+        else:
+            command = ["branch", "--no-color"]
+            if arguments.all:
+                command.append("--all")
+            output = await run_git(
+                self._workspace_dir,
+                command,
+                stdin_data=None,
+                timeout_ms=self._default_timeout_ms,
+            )
+        return self._git_result(call, output)
+
+    async def _git_checkout(self, call: ToolCall, args: BaseModel) -> ToolResult:
+        arguments = cast(GitCheckoutArgs, args)
+        if not is_valid_branch(arguments.branch):
+            return self._fail(call, f"invalid branch name: {arguments.branch!r}")
+        output = await run_git(
+            self._workspace_dir,
+            ["checkout", arguments.branch],
+            stdin_data=None,
+            timeout_ms=self._default_timeout_ms,
+        )
+        return self._git_result(call, output)
+
+    async def _git_push(self, call: ToolCall, args: BaseModel) -> ToolResult:
+        arguments = cast(GitPushArgs, args)
+        branch = arguments.branch
+        if branch is None:
+            current = await run_git(
+                self._workspace_dir,
+                ["symbolic-ref", "--short", "HEAD"],
+                stdin_data=None,
+                timeout_ms=self._default_timeout_ms,
+            )
+            if current.exit_code != 0:
+                return self._git_result(call, current)
+            branch = current.stdout.strip()
+        if not is_valid_branch(branch):
+            return self._fail(call, f"invalid branch name: {branch!r}")
+        command = ["push"]
+        if arguments.set_upstream:
+            command.append("-u")
+        if arguments.force:
+            command.append("--force")
+        command += [arguments.remote, branch]
+        output = await run_git(
+            self._workspace_dir,
+            command,
+            stdin_data=None,
+            timeout_ms=self._default_timeout_ms,
+        )
+        return self._git_result(call, output)
+
     async def _git_diff(self, call: ToolCall, args: BaseModel) -> ToolResult:
         arguments = cast(GitDiffArgs, args)
         command = ["diff", "--no-color"]
@@ -405,6 +504,17 @@ class ToolExecutor:
 
     async def _git_commit(self, call: ToolCall, args: BaseModel) -> ToolResult:
         arguments = cast(GitCommitArgs, args)
+        if self._git_protect_dirty_tree:
+            baseline = await self._baseline()
+            current = await self._snapshot_dirty()
+            protected = sorted(baseline & current)
+            if protected:
+                listed = ", ".join(protected)
+                return self._fail(
+                    call,
+                    f"refusing to commit: pre-existing uncommitted changes remain "
+                    f"in the working tree ({listed}); commit or stash them first",
+                )
         stage = await run_git(
             self._workspace_dir,
             ["add", "-A"],
@@ -423,7 +533,44 @@ class ToolExecutor:
             stdin_data=arguments.message,
             timeout_ms=self._default_timeout_ms,
         )
+        if output.exit_code == 0:
+            self._baseline_dirty = await self._snapshot_dirty()
         return self._git_result(call, output)
+
+    async def _snapshot_dirty(self) -> frozenset[str]:
+        """Return the set of working-tree paths git currently reports dirty."""
+        output = await run_git(
+            self._workspace_dir,
+            ["status", "--porcelain"],
+            stdin_data=None,
+            timeout_ms=self._default_timeout_ms,
+        )
+        if output.timed_out or output.exit_code != 0:
+            return frozenset()
+        return frozenset(parse_porcelain(output.stdout))
+
+    async def _baseline(self) -> frozenset[str]:
+        """The set of paths dirty when this executor was first used.
+
+        Snapshotting on first mutation (rather than at construction) keeps
+        construction cheap and works for workspaces that are not yet git
+        repositories; the result is cached for the executor's lifetime.
+        """
+        if self._baseline_dirty is None:
+            self._baseline_dirty = await self._snapshot_dirty()
+        return self._baseline_dirty
+
+    async def _guard_dirty_path(self, call: ToolCall, path: Path) -> str | None:
+        """Return an error when ``path`` was dirty before this session began."""
+        if not self._git_protect_dirty_tree:
+            return None
+        relative = os.path.relpath(path, self._workspace_dir)
+        if relative in await self._baseline():
+            return (
+                f"{relative!r} has uncommitted changes from before this session; "
+                f"commit or stash them before asking the agent to modify it"
+            )
+        return None
 
     def _sandbox_result(self, call: ToolCall, output: SandboxOutput, timeout_ms: int) -> ToolResult:
         if output.timed_out:

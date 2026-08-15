@@ -13,16 +13,45 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_TIMEOUT_MS = 30_000
+
+_BRANCH_INVALID_RE = re.compile(r"[\s~^:?*\[\x00-\x1f]|\.\.|\.lock$|\.$|@{|^[.-]")
 
 _GIT_ENV = {
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_PAGER": "cat",
     "GIT_CONFIG_NOSYSTEM": "1",
 }
+
+
+def is_valid_branch(name: str) -> bool:
+    """Return whether ``name`` is safe to pass as a git branch argument.
+
+    Rejects anything that could be parsed as an option (leading ``-``), that
+    contains whitespace/control characters or git pathname specials (``..``,
+    ``@{``, ``~``, ``^``, ``:``, ``?``, ``*``, ``[``, ``\\``), or that names a
+    dot-file (``.``/``.lock`` suffixes).
+    """
+    return bool(name) and _BRANCH_INVALID_RE.search(name) is None
+
+
+def parse_porcelain(status: str) -> set[str]:
+    """Return the set of dirty paths from ``git status --porcelain`` output.
+
+    Renames (``R old -> new``) contribute their destination path only.
+    """
+    paths: set[str] = set()
+    for line in status.splitlines():
+        entry = line[3:].strip() if len(line) > 3 else line
+        if " -> " in entry:
+            entry = entry.split(" -> ", 1)[1]
+        if entry:
+            paths.add(entry)
+    return paths
 
 
 @dataclass

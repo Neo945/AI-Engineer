@@ -108,6 +108,10 @@ def test_every_declared_tool_has_a_spec() -> None:
         ToolName.GIT_STATUS,
         ToolName.GIT_DIFF,
         ToolName.GIT_COMMIT,
+        ToolName.GIT_LOG,
+        ToolName.GIT_BRANCH,
+        ToolName.GIT_CHECKOUT,
+        ToolName.GIT_PUSH,
     }
     assert declared == {spec.name for spec in ALL_SPECS}
 

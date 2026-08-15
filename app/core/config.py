@@ -77,6 +77,11 @@ class Settings(BaseSettings):
             deny list (commands blocked outright).
         command_confirm_extra: Extra regex patterns, appended to the built-in
             confirm list (commands that require ``confirm=True``).
+        git_protect_dirty_tree: Refuse to modify a file that already had
+            uncommitted changes when the executor was created, and refuse to
+            commit while such pre-existing changes are still in the working
+            tree, so the agent never silently overwrites or sweeps up the
+            user's in-progress edits.
         otel_enabled: Export OpenTelemetry traces and metrics when true. When
             false every monitoring call resolves to a no-op provider, so the
             instrumentation is always safe and free.
@@ -149,6 +154,8 @@ class Settings(BaseSettings):
     command_policy_enabled: bool = True
     command_deny_extra: list[str] = Field(default_factory=list)
     command_confirm_extra: list[str] = Field(default_factory=list)
+
+    git_protect_dirty_tree: bool = True
 
     otel_enabled: bool = False
     otel_service_name: str = "coding-agent"

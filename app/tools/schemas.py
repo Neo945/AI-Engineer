@@ -33,6 +33,10 @@ class ToolName(StrEnum):
     GIT_STATUS = "git_status"
     GIT_DIFF = "git_diff"
     GIT_COMMIT = "git_commit"
+    GIT_LOG = "git_log"
+    GIT_BRANCH = "git_branch"
+    GIT_CHECKOUT = "git_checkout"
+    GIT_PUSH = "git_push"
 
 
 class ToolCall(BaseModel):
