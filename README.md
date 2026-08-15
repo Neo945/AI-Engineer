@@ -46,7 +46,10 @@ deterministic file-level dependency graph from the workspace's source files
 (`engineer graph` renders it as text or a Mermaid flowchart, with per-file
 neighborhood focus) and seeds the LLM with that graph for a staff-architect
 write-up of components, layers, key files, and recommendations
-(`engineer arch`).
+(`engineer arch`). A **system-design mode** (`engineer design "goal"`)
+generates a full design document for a goal — architecture, components, API
+contracts, data/event model, caching, failure handling, scaling,
+observability, and Mermaid diagrams — and runs outside any bound workspace.
 
 ## Architecture
 
@@ -189,6 +192,24 @@ engineer arch --mermaid                 # ... and ask it to include a component 
   degrades gracefully — a prose reply still yields a summary, and malformed
   entries are skipped.
 
+## System design
+
+`engineer design` generates a system-design document for a goal, without
+needing a bound workspace:
+
+```bash
+engineer design "distributed URL shortener"
+engineer design "event-driven order processing with outbox"
+```
+
+The LLM acts as a staff software architect and returns a JSON report with
+architecture prose, named components, API endpoint contracts (method/path/
+request/response/notes), data entities, events, caching, failure handling,
+scaling, observability, Mermaid diagrams (flowchart + sequence), assumptions,
+and risks. Rendering is Markdown; Mermaid diagrams are emitted in fenced
+```mermaid``` blocks. Parsing degrades gracefully: a prose reply still yields
+a summary and any fenced Mermaid diagrams are recovered.
+
 ## Git workflow
 
 Agents can drive the repository themselves: `git_log`, `git_branch`,
@@ -241,3 +262,4 @@ make test-unit  # unit tests only, no infra required
 | `git`            | git tools, dirty-tree protection, PR/commit drafting | 13    |
 | `audit`          | staff-engineer production-readiness scoring          | 14    |
 | `architecture`   | dependency graph + LLM architecture analysis         | 15    |
+| `design`         | system-design mode with Mermaid diagrams             | 16    |

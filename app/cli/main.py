@@ -40,6 +40,7 @@ examples:
   engineer graph                    render the dependency graph (text or --mermaid)
   engineer graph app/core/config.py focus on one file's dependencies
   engineer arch                     LLM architecture analysis seeded by the graph
+  engineer design "url shortener"   generate a system-design document with diagrams
   engineer memory add "pins are async" --kind decision
   engineer memory list --limit 20
   engineer memory recall "why sqlite?"
@@ -186,6 +187,17 @@ def build_parser() -> ArgumentParser:
         help="ask the model to include a Mermaid component diagram",
     )
     arch.set_defaults(handler=_cmd_arch)
+
+    design = subparsers.add_parser(
+        "design",
+        help="generate a system-design document for a goal",
+    )
+    design.add_argument(
+        "goal",
+        nargs="+",
+        help="the system to design; quote it or use multiple words",
+    )
+    design.set_defaults(handler=_cmd_design)
 
     test = subparsers.add_parser("test", help="run the project's test suite")
     test.add_argument(
@@ -439,6 +451,17 @@ async def _cmd_arch(
     )
 
 
+async def _cmd_design(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    return await commands.cmd_design(
+        ctx,
+        repo=repo,
+        state=state,
+        goal=" ".join(args.goal),
+    )
+
+
 async def _cmd_test(
     ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
 ) -> int:
@@ -543,7 +566,7 @@ async def arun(argv: Sequence[str] | None, ctx: CliContext) -> int:
     args = build_parser().parse_args(argv)
     init_telemetry(ctx.settings)
     try:
-        if args.command == "eval":
+        if args.command in ("eval", "design"):
             repo = Path.cwd()
             state = None
         else:

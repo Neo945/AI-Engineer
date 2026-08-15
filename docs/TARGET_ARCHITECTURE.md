@@ -118,7 +118,7 @@ distributed-systems analysis).
 | **Code graph** | `app/architecture/` (`deps`, `render`) | **Done (P1).** `engineer graph` text/Mermaid; metrics (hubs/cycles/orphans/layers). |
 | **Memory** | `app/memory/` (empty) | **New (P1).** |
 | **Test-and-repair loop** | — | **New (P0).** |
-| **Modes** (audit/design/analyze/modernize) | `app/audit/` + `app/architecture/report.py` | **Partial (P1/P2).** audit + arch done; design/analyze open. |
+| **Modes** (audit/design/analyze/modernize) | `app/audit/`, `app/architecture/`, `app/design/` | **Partial (P1/P2).** audit + arch + design done; distributed-systems analysis + modernize open. |
 | **Observability** | `app/monitoring/` (empty) + structlog | **New (P1).** |
 | **Evals harness** | `app/evals/` (empty) | **New (P1).** |
 | **Auth** | `users` model + repo only | **New (P1).** |
@@ -203,8 +203,10 @@ Order matters; each step keeps the suite green.
    Mermaid, hubs/cycles/orphans/layers) and `engineer arch` (LLM analysis
    seeded by the graph).
 10. **Distributed-systems analysis** and **system-design mode** (Mermaid
-    diagrams). Partial: `engineer arch --mermaid`; `engineer design "..."`
-    still open.
+    diagrams). Partial: `engineer arch --mermaid` and `engineer design "..."`
+    (architecture, components, API, data/event model, caching, failure
+    handling, scaling, observability, diagrams) are done; distributed-systems
+    analysis (`engineer analyze`) still open.
 11. **Memory**: session/project/decision memory, inspectable/editable
     (`engineer memory`, `memory list`, `memory clear`).
 12. **Git workflow**: `log/branch/checkout/push` tools, pre-modification

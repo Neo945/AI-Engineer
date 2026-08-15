@@ -56,6 +56,12 @@ from app.database.models.task import Task
 from app.database.models.workspace import Workspace
 from app.database.repositories.task import TaskRepository
 from app.database.repositories.workspace import WorkspaceRepository
+from app.design import (
+    DESIGN_PROMPT,
+    build_design_seed,
+    parse_design_report,
+    render_design,
+)
 from app.evals import (
     BENCHMARK_TASKS,
     EvalResultRecord,
@@ -1002,6 +1008,43 @@ async def cmd_arch(
             raise CliError(_llm_failure_hint(exc)) from exc
         report = parse_architecture_report(response.content)
         ctx.console.print(render_architecture(report))
+        return 0
+    finally:
+        if llm_owned:
+            await llm.close()
+
+
+async def cmd_design(
+    ctx: CliContext,
+    *,
+    repo: Path,
+    state: WorkspaceState | None,
+    goal: str,
+    llm: LLMProvider | None = None,
+) -> int:
+    """Generate a system-design document for a goal.
+
+    The LLM acts as a staff software architect, producing a structured
+    :class:`DesignReport` (architecture, components, API contracts, data/event
+    model, caching, failure handling, scaling, observability, Mermaid
+    diagrams). Repo-independent: works outside a bound workspace.
+    """
+    llm_owned = llm is None
+    if llm is None:
+        llm = _build_llm(ctx)
+    try:
+        try:
+            response = await llm.complete(
+                [ChatMessage(role=ChatRole.USER, content=build_design_seed(goal))],
+                tools=[],
+                system=DESIGN_PROMPT,
+                max_tokens=ctx.settings.llm_max_tokens,
+                temperature=ctx.settings.llm_temperature,
+            )
+        except Exception as exc:
+            raise CliError(_llm_failure_hint(exc)) from exc
+        report = parse_design_report(response.content)
+        ctx.console.print(render_design(report))
         return 0
     finally:
         if llm_owned:
