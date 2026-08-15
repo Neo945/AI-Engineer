@@ -103,7 +103,9 @@ async def _git(
 def _build_llm(ctx: CliContext) -> LLMProvider:
     """Build the configured LLM client, or raise a friendly error."""
     try:
-        return build_llm_client(ctx.settings)
+        from app.monitoring.tracing import InstrumentedLLM
+
+        return InstrumentedLLM(build_llm_client(ctx.settings))
     except Exception as exc:
         raise CliError(LLM_UNCONFIGURED_HINT) from exc
 
@@ -715,9 +717,7 @@ _SEVERITY_STYLE = {
 }
 
 
-def _render_findings_table(
-    console: Console, findings: Sequence[ReviewFinding]
-) -> None:
+def _render_findings_table(console: Console, findings: Sequence[ReviewFinding]) -> None:
     """Render review findings as a severity-ordered table."""
     ordered = sort_findings(list(findings))
     table = Table(title=f"review findings ({len(ordered)})")

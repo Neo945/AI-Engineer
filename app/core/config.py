@@ -77,6 +77,14 @@ class Settings(BaseSettings):
             deny list (commands blocked outright).
         command_confirm_extra: Extra regex patterns, appended to the built-in
             confirm list (commands that require ``confirm=True``).
+        otel_enabled: Export OpenTelemetry traces and metrics when true. When
+            false every monitoring call resolves to a no-op provider, so the
+            instrumentation is always safe and free.
+        otel_service_name: ``service.name`` resource attribute attached to
+            every span and metric data point.
+        otel_exporter_endpoint: OTLP/HTTP endpoint (traces and metrics).
+        otel_traces_enabled: Export spans when true; metrics only otherwise.
+        otel_metrics_enabled: Export metrics when true; traces only otherwise.
     """
 
     model_config = SettingsConfigDict(
@@ -141,6 +149,12 @@ class Settings(BaseSettings):
     command_policy_enabled: bool = True
     command_deny_extra: list[str] = Field(default_factory=list)
     command_confirm_extra: list[str] = Field(default_factory=list)
+
+    otel_enabled: bool = False
+    otel_service_name: str = "coding-agent"
+    otel_exporter_endpoint: str = "http://localhost:4318"
+    otel_traces_enabled: bool = True
+    otel_metrics_enabled: bool = True
 
 
 @lru_cache

@@ -18,7 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.core.config import Settings, get_settings
 from app.database.engine import build_async_engine
 from app.database.session import create_session_factory
-from app.llm.factory import build_llm_client
 from app.orchestrator.broker import EventBroker
 from app.orchestrator.cancellation import CancellationRegistry
 
@@ -86,9 +85,11 @@ class Container:
         error only when a task is actually run.
         """
         if self._orchestrator is None:
+            from app.llm.factory import build_llm_client
+            from app.monitoring.tracing import InstrumentedLLM
             from app.orchestrator.orchestrator import Orchestrator
 
-            llm = build_llm_client(self.settings)
+            llm = InstrumentedLLM(build_llm_client(self.settings))
             self._orchestrator = Orchestrator(
                 session_factory=self.session_factory,
                 llm=llm,

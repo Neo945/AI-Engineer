@@ -24,6 +24,7 @@ from app.cli.context import (
     load_state,
     make_context,
 )
+from app.monitoring.telemetry import init_telemetry, shutdown_telemetry
 
 _EPILOG = """\
 examples:
@@ -412,6 +413,7 @@ async def arun(argv: Sequence[str] | None, ctx: CliContext) -> int:
     ``error:`` line and mapped to exit code 1.
     """
     args = build_parser().parse_args(argv)
+    init_telemetry(ctx.settings)
     try:
         if args.command == "eval":
             repo = Path.cwd()
@@ -433,6 +435,7 @@ async def arun(argv: Sequence[str] | None, ctx: CliContext) -> int:
         return 1
     finally:
         await ctx.aclose()
+        shutdown_telemetry()
 
 
 def run_cli(

@@ -26,6 +26,7 @@ from app.executor.executor import ToolExecutor
 from app.llm.messages import ChatMessage, ChatRole, ToolRequest
 from app.llm.protocol import LLMProvider
 from app.memory.service import MemoryService, format_memory_block
+from app.monitoring import instruments as inst
 from app.orchestrator.broker import EventBroker
 from app.orchestrator.cancellation import CancellationRegistry, TaskCancelled
 from app.retrieval.context import ContextAssembler, format_context
@@ -228,6 +229,7 @@ class Orchestrator:
             task.output_tokens = result.output_tokens
             task.finished_at = _utcnow()
             await session.commit()
+            self._record_task_run(task)
 
             await self._emit(
                 OrchestratorEvent(
@@ -460,6 +462,7 @@ class Orchestrator:
         task.error = f"{type(exc).__name__}: {exc}"
         task.finished_at = _utcnow()
         await session.commit()
+        self._record_task_run(task)
         await self._emit(
             OrchestratorEvent(task_id=task.id, kind="failed", detail=task.error),
         )
@@ -477,6 +480,7 @@ class Orchestrator:
             task.status = TaskStatus.CANCELLED
             task.finished_at = _utcnow()
             await session.commit()
+            self._record_task_run(task)
         await self._emit(
             OrchestratorEvent(task_id=task.id, kind="cancelled", detail=task.error),
         )
@@ -491,6 +495,18 @@ class Orchestrator:
         if self._cancellations is None:
             return False
         return self._cancellations.is_requested(task_id)
+
+    @staticmethod
+    def _record_task_run(task: Task) -> None:
+        """Emit the task outcome metrics for a terminal run."""
+        started, finished = task.started_at, task.finished_at
+        duration = (finished - started).total_seconds() if started and finished else 0.0
+        inst.record_task_run(
+            agent_type=task.agent_type,
+            status=task.status.value,
+            duration_seconds=duration,
+            attempts=task.attempt,
+        )
 
     async def _discard_cancel(self, task_id: uuid.UUID) -> None:
         if self._cancellations is not None:

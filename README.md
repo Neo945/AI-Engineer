@@ -5,7 +5,7 @@ plans work, edits files, runs commands and tests, reviews its own output,
 and deploys — the architecture lineage of Cursor Agent, Claude Code, Devin,
 and GitHub Copilot Workspace.
 
-**Status:** Phase 11 (evaluation framework) complete. The provider-agnostic
+**Status:** Phase 12 (observability) complete. The provider-agnostic
 LLM abstraction (Anthropic, OpenAI, OpenAI-compatible local backends),
 LangGraph agents, the orchestrator, and the gateway task API exist and are
 tested. Tasks run **asynchronously** (`POST /sessions/{id}/tasks` returns
@@ -23,7 +23,11 @@ for rework (bounded by `pipeline_max_passes`). Durable per-workspace
 **memory** is recalled and injected into each run
 (`engineer memory add|list|recall|clear`), and a headless **eval harness**
 (`engineer eval`) runs six SWE-bench-style benchmarks against any LLM,
-records JSONL results, and compares pass rates across models.
+records JSONL results, and compares pass rates across models. OpenTelemetry
+**traces and metrics** (LLM calls, tool executions, task runs, HTTP
+requests) are emitted through a `monitoring` package that is a no-op by
+default — set `OTEL_ENABLED=true` and point `OTEL_EXPORTER_ENDPOINT` at a
+collector (e.g. Jaeger/Grafana) to export spans and metrics.
 
 ## Architecture
 
@@ -136,4 +140,4 @@ make test-unit  # unit tests only, no infra required
 | `memory`         | conversation / repo / preferences / long-term        | 10    |
 | `llm`            | provider abstraction + context management            | 5     |
 | `evals`          | headless task harness                                | 11    |
-| `monitoring`     | OTel, metrics, logging integration                   | 11    |
+| `monitoring`     | OTel traces + metrics, no-op by default              | 12    |

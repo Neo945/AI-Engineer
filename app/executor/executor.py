@@ -25,6 +25,7 @@ from app.executor.paths import PathTraversalError, resolve_within
 from app.executor.policy import CommandPolicy, CommandTier, policy_message
 from app.executor.sandbox import SandboxLimits, SandboxManager, SandboxOutput
 from app.executor.test_parser import format_report, parse_test_output
+from app.monitoring import instruments as inst
 from app.tools.registry import Handler, ToolRegistry
 from app.tools.schemas import ToolCall, ToolName, ToolResult
 from app.tools.specs import ALL_SPECS, ARGUMENT_MODELS
@@ -138,7 +139,12 @@ class ToolExecutor:
 
     async def execute(self, call: ToolCall) -> ToolResult:
         """Validate and dispatch a tool call, always returning a result."""
-        return await self._registry.execute(call)
+        result = await self._registry.execute(call)
+        inst.record_tool_call(
+            tool=str(call.tool),
+            outcome="success" if result.ok else "error",
+        )
+        return result
 
     def _register(self) -> None:
         table: dict[ToolName, Handler] = {

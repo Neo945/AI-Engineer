@@ -11,6 +11,8 @@ from app.core.config import Settings, get_settings
 from app.core.container import Container
 from app.core.logging import configure_logging, get_logger
 from app.gateway.routes import auth, health, tasks, users
+from app.monitoring.middleware import ObservabilityMiddleware
+from app.monitoring.telemetry import init_telemetry, shutdown_telemetry
 
 logger = get_logger(__name__)
 
@@ -31,9 +33,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         container = Container.build(resolved)
         app.state.container = container
+        init_telemetry(resolved)
         logger.info("application_started", environment=resolved.app_env)
         yield
         await container.aclose()
+        shutdown_telemetry()
         logger.info("application_stopped")
 
     app = FastAPI(
@@ -42,6 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         debug=resolved.debug,
         lifespan=lifespan,
     )
+    app.add_middleware(ObservabilityMiddleware)
     app.include_router(health.router, prefix=resolved.api_prefix)
     app.include_router(auth.router, prefix=resolved.api_prefix)
     app.include_router(users.router, prefix=resolved.api_prefix)
