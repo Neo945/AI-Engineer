@@ -28,6 +28,7 @@ from app.agents.base import DEFAULT_MAX_STEPS, LoopAgent
 from app.agents.pipeline import REVIEWER_PROMPT
 from app.agents.planning import TaskPlan, format_plan
 from app.agents.repair import RepairAgent
+from app.audit import AUDIT_PROMPT, AuditReport, parse_audit_report, resolve_verdict
 from app.cli.context import (
     LLM_UNCONFIGURED_HINT,
     CliContext,
@@ -844,6 +845,76 @@ async def cmd_review(
             await llm.close()
 
 
+async def cmd_audit(
+    ctx: CliContext,
+    *,
+    repo: Path,
+    state: WorkspaceState | None,
+    ref: str | None = None,
+    max_steps: int = DEFAULT_MAX_STEPS,
+    llm: LLMProvider | None = None,
+    executor: ToolExecutor | None = None,
+) -> int:
+    """Run a staff-engineer production-readiness audit of the changes.
+
+    The auditor inspects the working tree (or the diff against ``ref``) with
+    read-only tools, scores each dimension out of 100 with cited evidence,
+    and returns a structured :class:`AuditReport`. Exit code 0 means PASS;
+    any other outcome exits 1.
+    """
+    llm_owned = llm is None
+    if llm is None:
+        llm = _build_llm(ctx)
+    if executor is None:
+        executor = _build_executor(ctx, repo)
+    try:
+        target = "the working tree" if ref is None else f"the diff against {ref}"
+        seed = ChatMessage(
+            role=ChatRole.USER,
+            content=(
+                f"Audit {target} in this repository. Use the git status, git "
+                "diff, and git log tools (and file_read) to inspect the "
+                "changes, then produce the JSON audit report described in "
+                "your instructions."
+            ),
+        )
+        sink = _TokenSink(ctx.console)
+        agent = LoopAgent(
+            llm=llm,
+            executor=executor,
+            system_prompt=AUDIT_PROMPT,
+            max_steps=max_steps,
+            max_tokens=ctx.settings.llm_max_tokens,
+            temperature=ctx.settings.llm_temperature,
+            on_token=sink.feed,
+            stream=ctx.settings.cli_stream_tokens,
+        )
+        try:
+            result = await agent.run_from([seed])
+            answer = result.answer
+        except Exception as exc:
+            raise CliError(_llm_failure_hint(exc)) from exc
+        if not sink.finish():
+            ctx.console.print(answer)
+        report = parse_audit_report(answer)
+        verdict = resolve_verdict(report)
+        if report.verdict is None and report.scores:
+            ctx.console.print(f"[dim]no verdict stated; derived {verdict} from the scores[/]")
+        if verdict != "PASS":
+            ctx.console.print("[yellow]audit verdict: CHANGES_NEEDED[/]")
+        else:
+            ctx.console.print("[green]audit verdict: PASS[/]")
+        if report.scores:
+            _render_audit_table(ctx.console, report)
+        if report.findings:
+            _render_findings_table(ctx.console, report.findings)
+        return 0 if verdict == "PASS" else 1
+    finally:
+        await executor.sandboxes.close()
+        if llm_owned:
+            await llm.close()
+
+
 async def cmd_test(
     ctx: CliContext,
     *,
@@ -944,6 +1015,24 @@ _SEVERITY_STYLE = {
     "low": "cyan",
     "nit": "dim",
 }
+
+
+def _render_audit_table(console: Console, report: AuditReport) -> None:
+    """Render audit dimension scores as a table with evidence below."""
+    table = Table(title=f"audit scores ({len(report.scores)})")
+    table.add_column("dimension", style="cyan")
+    table.add_column("score", justify="right")
+    table.add_column("rationale")
+    table.add_column("evidence")
+    for score in report.scores:
+        style = "green" if score.score >= 70 else "red"
+        table.add_row(
+            score.dimension,
+            f"[{style}]{score.score}/100[/]",
+            score.rationale,
+            "\n".join(score.evidence),
+        )
+    console.print(table)
 
 
 def _render_findings_table(console: Console, findings: Sequence[ReviewFinding]) -> None:

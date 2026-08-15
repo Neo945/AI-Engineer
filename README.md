@@ -5,7 +5,7 @@ plans work, edits files, runs commands and tests, reviews its own output,
 and deploys — the architecture lineage of Cursor Agent, Claude Code, Devin,
 and GitHub Copilot Workspace.
 
-**Status:** Phase 13 (git workflow) complete. The provider-agnostic
+**Status:** Phase 14 (review/audit modes) complete. The provider-agnostic
 LLM abstraction (Anthropic, OpenAI, OpenAI-compatible local backends),
 LangGraph agents, the orchestrator, and the gateway task API exist and are
 tested. Tasks run **asynchronously** (`POST /sessions/{id}/tasks` returns
@@ -36,7 +36,12 @@ commit any path that was dirty before the session began. The CLI gains
 `engineer commit --generate` (LLM-drafted conventional commit messages)
 and `engineer pr`, which generates a PR title/body from the committed
 diff, pushes the branch, and opens the PR with `gh` (best-effort — the
-description is always saved under `.engineer/pr-<branch>.md`).
+description is always saved under `.engineer/pr-<branch>.md`). A
+**staff-engineer audit** (`engineer audit`) scores the changes across
+production-readiness dimensions (correctness, security, performance,
+maintainability, testability, observability, deployment) out of 100 with
+cited evidence, and derives a PASS/CHANGES_NEEDED verdict from the scores
+when the model omits one.
 
 ## Architecture
 
@@ -125,6 +130,32 @@ and a machine-readable **findings list**:
   printed even when the findings block is missing or malformed, so a sloppy
   reply never crashes the CLI.
 
+## Audit
+
+`engineer audit` runs a staff-engineer, production-readiness audit of the
+working tree (or the diff against a revision with `--ref`):
+
+```bash
+engineer audit              # audit the working tree's changes
+engineer audit --ref main   # audit the diff against main
+engineer audit --max-steps 4
+```
+
+The auditor inspects the changes with read-only tools and emits a single
+JSON object: an overall **summary**, a **verdict** (`PASS`/`CHANGES_NEEDED`),
+a list of **scores** (dimension, 0-100, rationale, cited evidence), and the
+same structured **findings** used by `engineer review`.
+
+- **Scores** — dimensions include correctness, security, performance,
+  maintainability, testability, observability, and production-readiness.
+  70+ means a dimension is acceptable.
+- **Verdict** — `PASS` only when every score is at least 70. If the model
+  omits the verdict, it is derived from the average score; exit code is `0`
+  for PASS and `1` otherwise.
+- **Evidence-backed** — every score carries cited evidence (files, line
+  numbers, short quotes) and malformed entries are skipped rather than
+  failing the audit.
+
 ## Git workflow
 
 Agents can drive the repository themselves: `git_log`, `git_branch`,
@@ -175,3 +206,4 @@ make test-unit  # unit tests only, no infra required
 | `evals`          | headless task harness                                | 11    |
 | `monitoring`     | OTel traces + metrics, no-op by default              | 12    |
 | `git`            | git tools, dirty-tree protection, PR/commit drafting | 13    |
+| `audit`          | staff-engineer production-readiness scoring          | 14    |

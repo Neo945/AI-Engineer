@@ -7,6 +7,7 @@ with a stubbed session factory, broker, and orchestrator.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import uuid
 from collections.abc import Sequence
@@ -20,6 +21,7 @@ from tests.unit.fake_llm import FakeLLM
 from app.cli.commands import (
     _short,
     _snippet,
+    cmd_audit,
     cmd_commit,
     cmd_diff,
     cmd_pr,
@@ -599,6 +601,15 @@ def test_parser_test_and_review_defaults() -> None:
     assert review_ref.ref == "HEAD~1"
     assert review_ref.max_steps == 3
 
+    audit = parser.parse_args(["audit"])
+    assert audit.command == "audit"
+    assert audit.ref is None
+    assert audit.max_steps == 8
+
+    audit_ref = parser.parse_args(["audit", "--ref", "main", "--max-steps", "4"])
+    assert audit_ref.ref == "main"
+    assert audit_ref.max_steps == 4
+
 
 async def test_cmd_test_runs_suite_and_reports_failure(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
@@ -1028,3 +1039,119 @@ async def test_cmd_pr_rejects_no_commits(tmp_path: Path) -> None:
 
     with pytest.raises(CliError, match="no commits"):
         await cmd_pr(ctx, repo=repo, state=None, base="main", branch="feature", yes=True)
+
+
+def _audit_response(summary: str, verdict: str, *scores: tuple[str, int]) -> LLMResponse:
+    payload = {
+        "summary": summary,
+        "verdict": verdict,
+        "scores": [
+            {"dimension": name, "score": value, "rationale": "r", "evidence": ["a.py:1"]}
+            for name, value in scores
+        ],
+        "findings": [],
+    }
+    return _response(json.dumps(payload))
+
+
+async def test_cmd_audit_pass_exits_zero(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    llm = FakeLLM([_audit_response("Looks ready.", "PASS", ("security", 92), ("tests", 85))])
+
+    code = await cmd_audit(ctx, repo=repo, state=None, llm=llm, executor=_StubExecutor(repo))
+
+    assert code == 0
+    out = buffer.getvalue()
+    assert "audit verdict: PASS" in out
+    assert "audit scores (2)" in out
+    assert "security" in out
+    assert "92/100" in out
+
+
+async def test_cmd_audit_changes_needed_exits_one(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    llm = FakeLLM([_audit_response("Needs work.", "CHANGES_NEEDED", ("security", 45))])
+
+    code = await cmd_audit(ctx, repo=repo, state=None, llm=llm, executor=_StubExecutor(repo))
+
+    assert code == 1
+    assert "audit verdict: CHANGES_NEEDED" in buffer.getvalue()
+
+
+async def test_cmd_audit_derives_verdict_from_scores(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    answer = (
+        '{"summary": "mixed", "scores": [{"dimension": "tests", "score": 40, "rationale": "r"}]}'
+    )
+    llm = FakeLLM([_response(answer)])
+
+    code = await cmd_audit(ctx, repo=repo, state=None, llm=llm, executor=_StubExecutor(repo))
+
+    assert code == 1
+    out = buffer.getvalue()
+    assert "no verdict stated; derived CHANGES_NEEDED" in out
+    assert "audit verdict: CHANGES_NEEDED" in out
+
+
+async def test_cmd_audit_renders_findings_table(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    answer = (
+        '{"summary": "audit", "verdict": "CHANGES_NEEDED", "scores": [], '
+        '"findings": [{"severity": "high", "file": "app/auth.py", "line": 12, '
+        '"problem": "expiry never checked", "fix": "compare now <= exp"}]}'
+    )
+    llm = FakeLLM([_response(answer)])
+
+    code = await cmd_audit(ctx, repo=repo, state=None, llm=llm, executor=_StubExecutor(repo))
+
+    assert code == 1
+    out = buffer.getvalue()
+    assert "review findings (1)" in out
+    assert "HIGH" in out
+    assert "app/auth.py:12" in out
+    assert "expiry never checked" in out
+
+
+async def test_cmd_audit_prose_reply_degrades_gracefully(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, buffer = _console()
+    ctx = CliContext(console=console, settings=_settings())
+    llm = FakeLLM([_response("Looks solid. No changes needed.")])
+
+    code = await cmd_audit(ctx, repo=repo, state=None, llm=llm, executor=_StubExecutor(repo))
+
+    assert code == 1
+    assert "audit verdict: CHANGES_NEEDED" in buffer.getvalue()
+
+
+async def test_cmd_audit_llm_failure_is_friendly(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    console, _ = _console()
+    ctx = CliContext(console=console, settings=_settings())
+
+    with pytest.raises(CliError, match="the model request failed"):
+        await cmd_audit(ctx, repo=repo, state=None, llm=_RaisingLLM(), executor=_StubExecutor(repo))
+
+
+async def test_cmd_audit_unconfigured_llm_is_friendly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path)
+
+    def _boom(_settings: Settings) -> LLMResponse:
+        raise RuntimeError("no provider")
+
+    monkeypatch.setattr("app.cli.commands.build_llm_client", _boom)
+    console, _ = _console()
+    ctx = CliContext(console=console, settings=_settings())
+
+    with pytest.raises(CliError, match="LLM is not configured"):
+        await cmd_audit(ctx, repo=repo, state=None, executor=_StubExecutor(repo))

@@ -36,6 +36,7 @@ examples:
   engineer test                     run the project's test suite (sandboxed)
   engineer test --fix               run tests and repair failures, then re-run
   engineer review                   structured review of the working tree
+  engineer audit                    staff-engineer production-readiness audit
   engineer memory add "pins are async" --kind decision
   engineer memory list --limit 20
   engineer memory recall "why sqlite?"
@@ -130,6 +131,16 @@ def build_parser() -> ArgumentParser:
         help="upper bound on reviewer LLM calls (default: 8)",
     )
     review.set_defaults(handler=_cmd_review)
+
+    audit = subparsers.add_parser("audit", help="staff-engineer production-readiness audit")
+    audit.add_argument("--ref", help="audit the diff against this revision instead")
+    audit.add_argument(
+        "--max-steps",
+        type=int,
+        default=8,
+        help="upper bound on auditor LLM calls (default: 8)",
+    )
+    audit.set_defaults(handler=_cmd_audit)
 
     test = subparsers.add_parser("test", help="run the project's test suite")
     test.add_argument(
@@ -337,6 +348,18 @@ async def _cmd_review(
     ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
 ) -> int:
     return await commands.cmd_review(
+        ctx,
+        repo=repo,
+        state=state,
+        ref=args.ref,
+        max_steps=args.max_steps,
+    )
+
+
+async def _cmd_audit(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    return await commands.cmd_audit(
         ctx,
         repo=repo,
         state=state,
