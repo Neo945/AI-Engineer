@@ -83,3 +83,11 @@ class LLMProvider(Protocol):
         max_tokens: int,
         temperature: float,
     ) -> AsyncIterator[LLMStreamEvent]: ...
+
+    async def close(self) -> None:
+        """Release any transport resources held by the provider.
+
+        Idempotent: safe to call more than once and on providers with no
+        external resources (such as test fakes).
+        """
+        ...

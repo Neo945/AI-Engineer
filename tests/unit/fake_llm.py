@@ -49,6 +49,9 @@ class FakeLLM(LLMProvider):
             return self._script.pop(0)
         return LLMResponse(content="Done.", model=self.model)
 
+    async def close(self) -> None:
+        """Nothing to release for a scripted fake."""
+
     async def stream(
         self,
         messages: Sequence[ChatMessage],

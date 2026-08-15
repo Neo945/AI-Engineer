@@ -182,6 +182,8 @@ class EvalRunner:
             task_status = final.status.value
             attempts = final.attempt
             tokens = (final.input_tokens or 0) + (final.output_tokens or 0)
+            if final.error:
+                error = final.error
         except TimeoutError:
             error = f"timed out after {timeout}s"
         except Exception as exc:

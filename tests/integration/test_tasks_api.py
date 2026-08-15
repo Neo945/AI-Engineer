@@ -46,10 +46,16 @@ class _StubRegistry:
         return self._specs
 
 
+class _StubSandboxes:
+    async def close(self) -> None:
+        return None
+
+
 class _StubExecutor:
     def __init__(self) -> None:
         self.workspace_dir = Path("/workspace")
         self.calls: list[ToolCall] = []
+        self.sandboxes = _StubSandboxes()
         self.registry = _StubRegistry(
             [
                 ToolSpec(

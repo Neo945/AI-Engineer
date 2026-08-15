@@ -202,6 +202,7 @@ class Orchestrator:
             workspace_dir = Path(task.session.workspace.repo_path)
             append = await self._transcript_appender(session, task)
 
+            executor: ToolExecutor | None = None
             try:
                 executor = self._executor_factory(workspace_dir)
                 agent = self._build_agent(task, executor, append)
@@ -214,6 +215,9 @@ class Orchestrator:
                 return await self._cancel(session, task)
             except Exception as exc:
                 return await self._fail(session, task, exc)
+            finally:
+                if executor is not None:
+                    await executor.sandboxes.close()
 
             if self._cancel_requested(task.id):
                 return await self._cancel(session, task)
@@ -263,6 +267,7 @@ class Orchestrator:
             workspace_dir = Path(task.session.workspace.repo_path)
             append = await self._transcript_appender(session, task)
 
+            executor: ToolExecutor | None = None
             try:
                 executor = self._executor_factory(workspace_dir)
                 planner = PlannerAgent(
@@ -286,6 +291,9 @@ class Orchestrator:
                 task.status = TaskStatus.PENDING
                 await session.commit()
                 raise ValueError(f"planning failed: {exc}") from exc
+            finally:
+                if executor is not None:
+                    await executor.sandboxes.close()
 
             task.status = TaskStatus.PENDING
             await TaskRepository(session).set_plan(

@@ -191,6 +191,10 @@ class OpenAIClient(LLMProvider):
         )
         return _parse_response(response)
 
+    async def close(self) -> None:
+        """Close the underlying HTTP client, releasing its connection pool."""
+        await self._client.close()
+
     async def stream(
         self,
         messages: Sequence[ChatMessage],

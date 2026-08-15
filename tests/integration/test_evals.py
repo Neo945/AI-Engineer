@@ -43,9 +43,15 @@ class _StubRegistry:
         return self._specs
 
 
+class _StubSandboxes:
+    async def close(self) -> None:
+        return None
+
+
 class _StubExecutor:
     def __init__(self) -> None:
         self.registry = _StubRegistry()
+        self.sandboxes = _StubSandboxes()
 
     async def execute(self, call: ToolCall) -> ToolResult:
         return ToolResult(call_id=call.id, tool=call.tool, ok=True, output="ok")

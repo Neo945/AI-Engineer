@@ -555,6 +555,7 @@ async def cmd_review(
     ``VERDICT: CHANGES_NEEDED`` plus actionable feedback. Exit code 0 means
     PASS; any other outcome exits 1.
     """
+    llm_owned = llm is None
     if llm is None:
         llm = _build_llm(ctx)
     if executor is None:
@@ -608,6 +609,8 @@ async def cmd_review(
         return 0 if verdict == "PASS" else 1
     finally:
         await executor.sandboxes.close()
+        if llm_owned:
+            await llm.close()
 
 
 async def cmd_test(
@@ -629,12 +632,14 @@ async def cmd_test(
     bounded by ``repairs`` (defaults to ``test_max_repairs``). Exit code 0
     means all tests passed.
     """
+    llm_owned = False
     if executor is None:
         executor = _build_executor(ctx, repo)
     try:
         if fix:
             if llm is None:
                 llm = _build_llm(ctx)
+                llm_owned = True
             max_repairs = repairs if repairs is not None else ctx.settings.test_max_repairs
             sink = _TokenSink(ctx.console)
             agent = RepairAgent(
@@ -679,6 +684,9 @@ async def cmd_test(
         return 0 if report.ok else 1
     finally:
         await executor.sandboxes.close()
+        if llm_owned:
+            assert llm is not None
+            await llm.close()
 
 
 async def _render_memory_entries(ctx: CliContext, entries: Sequence[MemoryEntry]) -> None:
@@ -905,6 +913,9 @@ async def cmd_eval_run(
 
     if llm is None:
         llm = _build_llm(ctx)
+        llm_owned = True
+    else:
+        llm_owned = False
 
     temp_dir: str | None = None
     try:
@@ -930,6 +941,8 @@ async def cmd_eval_run(
         _render_eval_result(ctx.console, record)
         return 0 if record.passed else 1
     finally:
+        if llm_owned:
+            await llm.close()
         if temp_dir is not None and not keep and not ctx.settings.eval_keep_workspaces:
             shutil.rmtree(temp_dir, ignore_errors=True)
 

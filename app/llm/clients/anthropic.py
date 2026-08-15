@@ -153,6 +153,10 @@ class AnthropicClient(LLMProvider):
         response = await self._client.messages.create(**kwargs)
         return _parse_response(response, requested_model=self.model)
 
+    async def close(self) -> None:
+        """Close the underlying HTTP client, releasing its connection pool."""
+        await self._client.close()
+
     async def stream(
         self,
         messages: Sequence[ChatMessage],

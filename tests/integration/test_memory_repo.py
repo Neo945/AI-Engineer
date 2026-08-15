@@ -39,10 +39,16 @@ class _EmptyRegistry:
         return []
 
 
+class _StubSandboxes:
+    async def close(self) -> None:
+        return None
+
+
 class _StubExecutor:
     def __init__(self) -> None:
         self.workspace_dir = Path("/workspace")
         self.registry = _EmptyRegistry()
+        self.sandboxes = _StubSandboxes()
 
     async def execute(self, call: object) -> object:
         raise AssertionError("no tool calls expected")

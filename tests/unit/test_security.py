@@ -91,7 +91,13 @@ def test_decode_access_token_rejects_wrong_secret() -> None:
 def test_decode_access_token_rejects_tampered_payload() -> None:
     settings = _settings(auth_secret="x" * 32)
     token = create_access_token(uuid.uuid4(), settings)
-    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+    header, payload, signature = token.split(".")
+    # Flip a signature character that carries a full 6 bits (not the final
+    # char, whose low bits can decode to the same bytes), so the signature
+    # is guaranteed to change and the token must be rejected.
+    position = len(signature) - 2
+    flipped = ("A" if signature[position] != "A" else "B")
+    tampered = f"{header}.{payload}.{signature[:position]}{flipped}{signature[position + 1:]}"
     assert decode_access_token(tampered, settings) is None
 
 

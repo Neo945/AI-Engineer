@@ -47,7 +47,12 @@ def _provision() -> EvalProvision:
     )
 
 
-def _task_row(*, status: TaskStatus = TaskStatus.COMPLETED, attempt: int = 1) -> Task:
+def _task_row(
+    *,
+    status: TaskStatus = TaskStatus.COMPLETED,
+    attempt: int = 1,
+    error: str | None = None,
+) -> Task:
     return Task(
         session_id=uuid.uuid4(),
         agent_type="coder",
@@ -56,6 +61,7 @@ def _task_row(*, status: TaskStatus = TaskStatus.COMPLETED, attempt: int = 1) ->
         attempt=attempt,
         input_tokens=10,
         output_tokens=5,
+        error=error,
     )
 
 
@@ -175,6 +181,22 @@ async def test_run_skips_verify_when_task_fails(tmp_path: Path) -> None:
     assert record.task_status == "failed"
     assert verifier.called is False
     assert record.test_summary == "task did not complete"
+
+
+@pytest.mark.asyncio
+async def test_run_surfaces_task_error_in_summary(tmp_path: Path) -> None:
+    verifier = _VerifierStub(_passing_report())
+    orchestrator = _OrchestratorStub(
+        _task_row(status=TaskStatus.FAILED, error="FreeUsageLimitError: rate limited")
+    )
+    runner = _runner(orchestrator=orchestrator, verifier=verifier)
+
+    record = await runner.run(_task(), tmp_path)
+
+    assert record.passed is False
+    assert record.task_status == "failed"
+    assert verifier.called is False
+    assert record.test_summary == "FreeUsageLimitError: rate limited"
 
 
 @pytest.mark.asyncio
