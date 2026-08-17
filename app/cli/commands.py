@@ -343,7 +343,7 @@ async def cmd_run(
     goal = goal.strip()
     if not goal:
         raise CliError("goal is empty")
-    if agent_type not in {"coder", "pipeline"}:
+    if agent_type not in {"coder", "pipeline", "coordinator"}:
         raise CliError(f"unsupported agent_type: {agent_type}")
 
     async with ctx.db_session() as session:

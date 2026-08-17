@@ -327,6 +327,7 @@ Orchestrator(session_factory, llm, settings, on_event=None,
   #        emit "message" event          ← agent.on_message hook
   #   7. agent = _build_agent(task, executor, _append)
   #        coder → CoderAgent | pipeline → PipelineAgent (max_passes=…)
+  #        coordinator → CoordinatorAgent (max_specialists=…)
   #        unknown agent_type → ValueError (surfaced as task FAILED)
   #   8. try: result = await agent.run(task.goal)
   #        except TaskCancelled → _cancel
@@ -674,6 +675,7 @@ per-task cost accounting.
 | `LLM_TIMEOUT_SECONDS` | `120` | ≥1 |
 | `TASK_MAX_ATTEMPTS` | `3` | retry budget per task (≥1) |
 | `PIPELINE_MAX_PASSES` | `2` | rework rounds allowed in the multi-agent pipeline (≥0) |
+| `COORDINATOR_MAX_SPECIALISTS` | `2` | read-only specialists run concurrently by the coordinator (≥1) |
 
 ## 7. API contract
 
@@ -691,8 +693,9 @@ per-task cost accounting.
 `TaskResponse`: `id, session_id, parent_task_id, agent_type, status, goal,
 result, error, attempt, max_attempts, input_tokens, output_tokens,
 started_at, finished_at, created_at, updated_at`. Supported `agent_type`
-values are `coder` (default, single loop) and `pipeline` (multi-agent
-pipeline); an unknown type fails the task with a captured
+values are `coder` (default, single loop), `pipeline` (multi-agent pipeline)
+and `coordinator` (dispatch to parallel read-only specialists + optional
+coder); an unknown type fails the task with a captured
 `ValueError: unsupported agent_type: …`.
 
 `TaskDetailResponse` = TaskResponse + `messages: [{id, session_id, task_id,

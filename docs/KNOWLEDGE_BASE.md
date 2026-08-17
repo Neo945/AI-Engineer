@@ -14,7 +14,7 @@ state of the work. It is the single reference for resuming the session.
 | **Python** | 3.13, `asyncio` (single event loop per CLI run) |
 | **Dependencies** | FastAPI, SQLAlchemy 2 async + Alembic, PostgreSQL (pgvector), Redis, LangGraph, Pydantic v2, structlog, OpenTelemetry, rich (CLI), httpx |
 | **Infra** | `docker compose` (PostgreSQL + Redis), `infra/executor/Dockerfile` sandbox image |
-| **Status line** | Phase 17 (distributed-systems analysis) complete; all P0 and P1 items done |
+| **Status line** | Phase 18 (coordinator + parallel agents) complete; all P0 and P1 items done; P2 item 16 done |
 
 The repo was previously at `~/Documents/Default Project` in an opencode
 session; the real working directory is the Downloads repo. The opencode
@@ -185,15 +185,12 @@ engineer eval list|run|results|compare [--model]
 
 ## 7. Roadmap
 
-All P0 and P1 items are complete. Remaining:
-- **P1**: Auth UI polish is optional; everything else done.
-- **P2**: coordinator + parallel agents (item 16); legacy modernization /
-  security / perf analysis modes (item 17); MCP tool integration (item 18);
-  deployment CI/CD + K8s (item 19); Web UI / VS Code extension (item 20).
+All P0 and P1 items are complete. P2 item 16 (coordinator) is also done.
+Remaining P2: legacy modernization / security / perf analysis modes (item 17);
+MCP tool integration (item 18); deployment CI/CD + K8s (item 19); Web UI /
+VS Code extension (item 20).
 
-Suggested next step from this session: **Phase 18 — coordinator + parallel
-agents** (P2 item 16), or auth UI. P2 items are additive and lower priority;
-confirm scope before starting.
+Suggested next step from this session: P2 items — confirm scope before starting.
 
 ## 8. Working agreements for this session
 

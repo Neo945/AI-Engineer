@@ -103,6 +103,9 @@ def test_parser_run_defaults() -> None:
     pipeline = parser.parse_args(["run", "--agent-type", "pipeline", "go"])
     assert pipeline.agent_type == "pipeline"
 
+    coordinator = parser.parse_args(["run", "--agent-type", "coordinator", "go"])
+    assert coordinator.agent_type == "coordinator"
+
     with pytest.raises(SystemExit):
         parser.parse_args(["run", "--agent-type", "debugger", "go"])
 

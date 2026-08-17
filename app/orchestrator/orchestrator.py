@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.base import AgentLike, TokenHandler
 from app.agents.coder import CoderAgent
+from app.agents.coordinator import CoordinatorAgent
 from app.agents.pipeline import PipelineAgent
 from app.agents.planner import PlannerAgent
 from app.agents.planning import TaskPlan, format_plan
@@ -132,9 +133,11 @@ class Orchestrator:
         """Build the agent that runs ``task``, dispatching on its agent type.
 
         ``coder`` runs the single coder loop; ``pipeline`` runs the composed
-        planner → coder → reviewer → tester pipeline over the same transcript.
-        Unknown types raise a ``ValueError`` that the caller turns into a
-        failed task.
+        planner → coder → reviewer → tester pipeline over the same transcript;
+        ``coordinator`` dispatches the goal to parallel read-only specialists
+        (security/performance), optionally runs a coder for changes, and
+        synthesizes one answer. Unknown types raise a ``ValueError`` that the
+        caller turns into a failed task.
         """
         should_cancel = self._cancel_checked(task.id)
         if task.agent_type == "pipeline":
@@ -150,6 +153,18 @@ class Orchestrator:
                 max_passes=self._settings.pipeline_max_passes,
                 max_repairs=self._settings.test_max_repairs,
                 test_command=self._settings.test_command,
+            )
+        if task.agent_type == "coordinator":
+            return CoordinatorAgent(
+                llm=self._llm,
+                executor=executor,
+                max_tokens=self._settings.llm_max_tokens,
+                temperature=self._settings.llm_temperature,
+                on_message=on_message,
+                on_token=self._on_token,
+                stream=self._stream,
+                should_cancel=should_cancel,
+                max_specialists=self._settings.coordinator_max_specialists,
             )
         if task.agent_type == "coder":
             return CoderAgent(

@@ -96,8 +96,8 @@ def test_decode_access_token_rejects_tampered_payload() -> None:
     # char, whose low bits can decode to the same bytes), so the signature
     # is guaranteed to change and the token must be rejected.
     position = len(signature) - 2
-    flipped = ("A" if signature[position] != "A" else "B")
-    tampered = f"{header}.{payload}.{signature[:position]}{flipped}{signature[position + 1:]}"
+    flipped = "A" if signature[position] != "A" else "B"
+    tampered = f"{header}.{payload}.{signature[:position]}{flipped}{signature[position + 1 :]}"
     assert decode_access_token(tampered, settings) is None
 
 

@@ -22,7 +22,7 @@ from app.executor.executor import ToolExecutor
 from app.llm.messages import ChatMessage, ChatRole, ToolRequest
 from app.llm.protocol import LLMProvider, LLMResponse, LLMUsage
 from app.orchestrator.cancellation import TaskCancelled
-from app.tools.schemas import ToolCall, ToolName, ToolResult
+from app.tools.schemas import ToolCall, ToolName, ToolResult, ToolSpec
 
 DEFAULT_MAX_STEPS = 8
 
@@ -108,6 +108,10 @@ class LoopAgent:
         should_cancel: Optional predicate checked at each step boundary;
             when it returns ``True`` the run raises :class:`TaskCancelled`
             and stops at the next safe point (cooperative cancellation).
+        tool_names: Optional allowlist of tool names the agent may use; when
+            ``None`` every registered tool is offered. Any other tool is
+            rejected with a tool error instead of being executed, letting
+            composed agents confine sub-loops to a safe subset.
     """
 
     def __init__(
@@ -123,6 +127,7 @@ class LoopAgent:
         on_token: TokenHandler | None = None,
         stream: bool = False,
         should_cancel: Callable[[], bool] | None = None,
+        tool_names: Sequence[ToolName] | None = None,
     ) -> None:
         self._llm = llm
         self._executor = executor
@@ -134,6 +139,7 @@ class LoopAgent:
         self._on_token = on_token
         self._stream = stream
         self._should_cancel = should_cancel
+        self._tool_names = frozenset(tool_names) if tool_names is not None else None
         self._graph = self._build_graph()
 
     def _build_graph(self) -> Any:
@@ -239,6 +245,13 @@ class LoopAgent:
             "output_tokens": response.usage.output_tokens,
         }
 
+    def _offered_tools(self) -> list[ToolSpec]:
+        """The tool specs exposed to the LLM (respecting the allowlist)."""
+        specs = self._executor.registry.specs()
+        if self._tool_names is None:
+            return specs
+        return [spec for spec in specs if spec.name in self._tool_names]
+
     async def _complete(self, messages: Sequence[ChatMessage]) -> LLMResponse:
         """Call the LLM, streaming tokens when ``stream`` is enabled.
 
@@ -250,7 +263,7 @@ class LoopAgent:
         if not self._stream:
             return await self._llm.complete(
                 messages,
-                tools=self._executor.registry.specs(),
+                tools=self._offered_tools(),
                 system=self._system_prompt,
                 max_tokens=self._max_tokens,
                 temperature=self._temperature,
@@ -262,7 +275,7 @@ class LoopAgent:
         except Exception:
             response = await self._llm.complete(
                 messages,
-                tools=self._executor.registry.specs(),
+                tools=self._offered_tools(),
                 system=self._system_prompt,
                 max_tokens=self._max_tokens,
                 temperature=self._temperature,
@@ -284,7 +297,7 @@ class LoopAgent:
         model_name = self._llm.model
         async for event in self._llm.stream(
             messages,
-            tools=self._executor.registry.specs(),
+            tools=self._offered_tools(),
             system=self._system_prompt,
             max_tokens=self._max_tokens,
             temperature=self._temperature,
@@ -313,6 +326,14 @@ class LoopAgent:
             message = ChatMessage(
                 role=ChatRole.TOOL,
                 content=f"unknown tool: {request.name}",
+                tool_call_id=request.id,
+            )
+            await self._invoke_on_message(message)
+            return message
+        if self._tool_names is not None and tool not in self._tool_names:
+            message = ChatMessage(
+                role=ChatRole.TOOL,
+                content=f"tool {request.name} is not allowed for this agent",
                 tool_call_id=request.id,
             )
             await self._invoke_on_message(message)

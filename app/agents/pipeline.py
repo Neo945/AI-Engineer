@@ -55,7 +55,7 @@ REVIEWER_PROMPT = (
     "line. "
     "After the verdict, list each finding as an entry in a single JSON array "
     "inside a fenced code block, like:\n"
-    '```json\n'
+    "```json\n"
     '[{"severity": "high", "file": "app/auth.py", "line": 12, '
     '"problem": "short description", "reason": "why it matters", '
     '"fix": "suggested fix"}]\n'

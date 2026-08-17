@@ -7,13 +7,16 @@ to achieve), the **deliverables** (what was built), and the **result**
 
 Final state at the time of writing:
 
-- **Tests:** 150 passing (unit + integration + sandbox)
+- **Tests:** 548 passing (470 unit + 78 integration + sandbox)
 - **Linting:** `ruff` clean, `ruff format --check` clean
-- **Types:** `mypy --strict` clean over 85 source files
+- **Types:** `mypy` clean over 112 source files
 - **Database:** migrations `0001`–`0005` applied, downgrade/upgrade
   round-trips verified
 - **Repository:** committed and pushed to `main` at
   `github.com/Neo945/AI-Engineer`
+- **P1 complete:** all 8 differentiation items done (review/audit,
+  architecture, distributed-systems, memory, git, auth, observability,
+  evals)
 
 ---
 
@@ -374,6 +377,58 @@ types.
   (a pipeline task retries as one task).
 - Migration-independent: no schema changes were required; the existing
   `Task.agent_type` column now has two supported values.
+
+---
+
+## Step 11 — Coordinator + parallel specialists (Phase 18)
+
+**Spec**
+
+Add a coordinator agent that, from a cheap no-tool LLM decision, dispatches a
+goal to parallel read-only specialists (security, performance) and optionally
+a coder when the goal expects repository changes, then synthesizes one answer.
+Read-only specialists must never be offered mutating tools, so parallel reads
+stay safe; a coder applies changes sequentially over the accumulated
+transcript so reads and writes never race. An unparseable dispatch decision
+must degrade to read-only analysis (never unrequested edits).
+
+**Deliverables**
+
+- `app/agents/coordinator.py` — `CoordinatorAgent`, `CoordinatorResult`,
+  `DispatchDecision`, `Specialist`, `SPECIALISTS`, `READ_ONLY_TOOLS`,
+  `parse_dispatch`; the `LoopAgent` tool allowlist
+  (`tool_names`/`_offered_tools`/`_execute_tool` rejection) that confines each
+  specialist to read-only tools.
+- `app/agents/base.py` — `LoopAgent` accepts `tool_names`; requested tools
+  outside the allowlist return a `tool X is not allowed for this agent` result
+  instead of executing.
+- `app/orchestrator/orchestrator.py` — `_build_agent` maps
+  `agent_type: "coordinator"` to `CoordinatorAgent`.
+- `app/core/config.py` — `coordinator_max_specialists` (default 2) caps
+  concurrent specialists.
+- `app/cli/main.py`/`app/cli/commands.py` — `--agent-type` accepts
+  `coordinator`; `cmd_run` validates it.
+- `tests/unit/test_coordinator_agent.py` — dispatch parsing (fenced/bare JSON,
+  unknown/dedupe, unparseable fallback), read-only happy path, parallel
+  specialists, coder path, read-only tool confinement, `max_specialists` cap,
+  specialist-failure capture, cancellation, on_message streaming, and the
+  `LoopAgent` allowlist.
+- `tests/integration/test_orchestrator.py` — a `coordinator` task persists the
+  dispatch → specialist → synthesis transcript with summed token accounting
+  and events.
+
+**Result**
+
+- 16 new unit tests + 1 integration test; full suite green, `ruff` clean,
+  `mypy` clean.
+- A `coordinator` task runs dispatch → parallel read-only specialists (capped
+  by `coordinator_max_specialists`) → optional coder → synthesis; specialists
+  are confined to `READ_ONLY_TOOLS` and a mutating request is rejected by the
+  loop allowlist; an unparseable dispatch falls back to read-only analysis;
+  a failed specialist is recorded as a transcript entry without failing the
+  run.
+- Migration-independent: no schema changes; `Task.agent_type` now has three
+  supported values.
 
 ---
 

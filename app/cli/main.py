@@ -32,6 +32,7 @@ examples:
   engineer index                   index the workspace's source files
   engineer run fix the failing test
   engineer run --agent-type pipeline refactor the auth service
+  engineer run --agent-type coordinator assess the payment service
   engineer run -y drop the migration (approve the plan automatically)
   engineer test                     run the project's test suite (sandboxed)
   engineer test --fix               run tests and repair failures, then re-run
@@ -82,7 +83,7 @@ def build_parser() -> ArgumentParser:
     run = subparsers.add_parser("run", help="plan a goal, then run it after approval")
     run.add_argument(
         "--agent-type",
-        choices=("coder", "pipeline"),
+        choices=("coder", "pipeline", "coordinator"),
         default="coder",
         help="which agent to run (default: coder)",
     )

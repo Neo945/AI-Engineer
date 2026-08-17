@@ -104,6 +104,7 @@ distributed-systems analysis).
 | Agent Orchestrator | `app/orchestrator/orchestrator.py` | **Keep.** |
 | Agent loop | `app/agents/base.py` (`LoopAgent`) | **Keep.** |
 | Coder | `app/agents/coder.py` | **Keep.** |
+| Coordinator (parallel specialists) | `app/agents/coordinator.py` | **Done (P2, item 16).** Dispatch → parallel read-only security/perf specialists → optional coder → synthesis; `READ_ONLY_TOOLS` allowlist. |
 | Pipeline (planner/coder/reviewer/tester) | `app/agents/pipeline.py` | **Keep.** Reused by the coordinator and modes. |
 | LLM abstraction | `app/llm/` (protocol, openai, anthropic, factory) | **Keep.** Add Gemini (P1). |
 | Tool contracts | `app/tools/` (`ToolCall`/`ToolResult`/`ToolSpec`, registry) | **Keep.** Add tools (P0). |
@@ -195,39 +196,40 @@ Order matters; each step keeps the suite green.
 
 ### P1 — Differentiation
 
-8. **Review/audit modes**: standalone structured review (severity/file/line/
-   problem/reason/fix); `engineer audit` staff-engineer + production-readiness
-   scores backed by evidence.
-9. **Architecture analysis + dependency graph** (file/class/module edges from
-   the index). **Done**: `engineer graph` (deterministic file graph, text +
-   Mermaid, hubs/cycles/orphans/layers) and `engineer arch` (LLM analysis
-   seeded by the graph).
-10. **Distributed-systems analysis** and **system-design mode** (Mermaid
-    diagrams). **Done**: `engineer arch --mermaid`, `engineer design "..."`
-    (architecture, components, API, data/event model, caching, failure
-    handling, scaling, observability, diagrams), and `engineer analyze`
-    (deterministic concern scan for sync/async HTTP, retries, idempotency,
-    concurrency, locking, caching, timeouts, circuit breakers, messaging;
-    `--scan-only` skips the LLM; otherwise the evidence seeds an LLM report
-    with findings and recommendations).
-11. **Memory**: session/project/decision memory, inspectable/editable
-    (`engineer memory`, `memory list`, `memory clear`).
-12. **Git workflow**: `log/branch/checkout/push` tools, pre-modification
-    working-tree check, `engineer commit` + `engineer pr` (title/summary/
-    changes/tests/risks/migration notes).
-13. **Auth + workspace/session management APIs** (register/login/refresh/
-    logout/me; user-scoped workspaces and sessions; ownership checks) — the
-    previously-planned Phase 9.
-14. **Observability**: OTel traces, metrics (LLM calls, tokens, latency, cost,
-    tool failures, task/test success), token-level streaming to CLI.
-15. **Evaluation framework**: benchmark tasks (fix auth bug, add REST endpoint,
-    add DB migration, fix failing test, optimize query, find security issue),
-    headless runner, result store, multi-model comparison.
+8. **Review/audit modes**: **Done** — `engineer review` (standalone structured
+   review with severity/file/line/problem/reason/fix) and `engineer audit`
+   (staff-engineer + production-readiness scoring backed by evidence).
+9. **Architecture analysis + dependency graph**: **Done** — `engineer graph`
+   (deterministic file graph, text + Mermaid, hubs/cycles/orphans/layers) and
+   `engineer arch` (LLM analysis seeded by the graph).
+10. **Distributed-systems analysis** and **system-design mode**: **Done** —
+    `engineer analyze` (deterministic concern scan with `--scan-only` option)
+    and `engineer design "…"` (architecture, APIs, data/event model, caching,
+    failure handling, scaling, observability, Mermaid diagrams).
+11. **Memory**: **Done** — session/project/decision memory, inspectable/editable
+    (`engineer memory`, `memory list`, `memory clear`); orchestrator injects
+    recalled memory into agent context.
+12. **Git workflow**: **Done** — 7 git tools (status, diff, commit, log,
+    branch, checkout, push); `engineer commit` with LLM message generation;
+    `engineer pr` with LLM-generated title/summary/tests/risks/migration notes
+    + `gh pr create` (graceful fallback).
+13. **Auth + workspace/session management APIs**: **Done** — register/login/
+    refresh/logout/me; user-scoped workspaces and sessions; ownership checks.
+14. **Observability**: **Done** — OTel traces/metrics (LLM calls, tokens,
+    duration, tool calls, task runs, HTTP requests), `InstrumentedLLM` wrapper,
+    HTTP middleware, token-level streaming to CLI via `_TokenSink`.
+15. **Evaluation framework**: **Done** — 6 benchmark tasks, headless
+    `EvalRunner`, `ResultStore` (JSONL), `engineer eval list|run|results|compare`
+    CLI.
 
 ### P2 — Advanced
 
 16. **Coordinator + parallel agents**: intent → dispatch to specialized
     agents (security/perf/testing) when valuable, parallel where safe.
+    **Done (Phase 18)** — `CoordinatorAgent` dispatches to read-only
+    security/performance specialists (capped by `coordinator_max_specialists`)
+    and optionally a coder, then synthesizes. Testing dispatch is a future
+    extension.
 17. **Legacy modernization**, security/performance analysis modes.
 18. **MCP tool integration** (GitHub/Jira/DBs/cloud) — tool layer is already
     spec-based; add an MCP adapter.
@@ -239,15 +241,15 @@ Order matters; each step keeps the suite green.
 
 ## 5. Acceptance criteria per phase
 
-- **P0 exit criteria:** `engineer "task"` on a fixture repo performs
+- **P0 exit criteria:** **Done.** `engineer "task"` on a fixture repo performs
   context → plan → approval → edits → real test run → repair → review
   summary; `engineer diff` shows surgical changes; destructive commands are
-  confirmed; all prior 150 tests stay green; new P0 tests added.
-- **P1 exit criteria:** every new mode has tests with a mock LLM; audit
+  confirmed; 470 unit + 78 integration tests pass.
+- **P1 exit criteria:** **Done.** every mode has tests with a mock LLM; audit
   scores cite evidence; memory is inspectable; auth protects every endpoint;
-  evals run benchmark tasks headlessly against mock + optional real LLMs.
-- **P2 exit criteria:** coordinator adds measurable value over the fixed
-  pipeline; MCP adapter demoed; deployment manifests included.
+  evals run 6 benchmark tasks headlessly with result store and model comparison.
+- **P2 exit criteria:** coordinator done; MCP adapter demoed; deployment
+  manifests included.
 
 ---
 

@@ -605,6 +605,53 @@ async def test_run_task_runs_multi_agent_pipeline(
     assert events[-1].detail.startswith("VERDICT: PASS\nTest run: pytest")
 
 
+async def test_run_task_runs_coordinator(
+    container: Container,
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    task = await _seed_task(db_session, workspace_dir=str(tmp_path), agent_type="coordinator")
+    fake = FakeLLM(
+        [
+            _final_response('{"specialists": ["security"], "needs_changes": false}'),
+            _final_response("Security: no issues found."),
+            _final_response("Final: clean bill of health."),
+        ]
+    )
+    events: list[OrchestratorEvent] = []
+    orchestrator = await _build_orchestrator(container, llm=fake, events=events)
+
+    await orchestrator.run_task(task.id)
+
+    async with container.session_factory() as fresh:
+        done = await TaskRepository(fresh).get(task.id)
+        persisted = await MessageRepository(fresh).list_by_session(task.session_id)
+    assert done is not None
+    assert done.status == TaskStatus.COMPLETED
+    assert done.result == "Final: clean bill of health."
+    assert done.error is None
+    assert done.input_tokens == 15
+    assert done.output_tokens == 6
+    assert done.attempt == 1
+    assert [message.role for message in persisted] == [
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.ASSISTANT,
+    ]
+    assert [message.content for message in persisted] == [
+        "Fix the bug",
+        "Security: no issues found.",
+        "Final: clean bill of health.",
+    ]
+    assert [event.kind for event in events] == [
+        "started",
+        "message",
+        "message",
+        "message",
+        "completed",
+    ]
+
+
 async def test_run_task_fails_unsupported_agent_type(
     container: Container,
     db_session: AsyncSession,

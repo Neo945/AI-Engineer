@@ -67,38 +67,38 @@ The project's **largest gaps are all above the runtime core**:
 
 | Capability            | Current State | Target State | Priority |
 | --------------------- | ------------- | ------------ | -------- |
-| CLI                   | **Missing.** HTTP gateway only (`app/gateway`). No `engineer` command, no TTY UX. | Rich terminal CLI (session, init/index/status, task, review/audit, test, diff/commit/pr) with streaming, confirmations, history. | P0 |
-| Repository indexing   | **Missing.** `app/retrieval/__init__.py` is a docstring-only stub. `code_chunks` table + pgvector exist but are never written. | File discovery, language detection, AST symbol extraction, code graph, embeddings, indexer service. | P0 |
-| Agent orchestration   | **Done.** `app/orchestrator` (LangGraph), durable transcript, events, retry/cancel; `coder` + `pipeline` agents. | Keep; add coordinator that picks agents per intent + parallel execution where safe. | P0 |
-| Tool execution        | **Done.** 10 tools (fs 6, terminal 1, git 3) via `ToolExecutor` + Docker sandbox. | Keep; add `edit_file`, `search_code` (symbol/semantic), git `log/branch/checkout/push`, `docker_*` tools. | P0 |
-| Memory                | **Missing.** `app/memory/__init__.py` stub. | Session, project, and decision memory; inspectable/editable (`engineer memory`). | P1 |
-| Architecture analysis | **Missing.** No dependency graph, no repo architecture map. | Dependency graph + architecture map (file/class/function/service/DB/API). | P1 |
-| Production audit      | **Missing.** No staff-engineer / production-readiness modes. | `engineer audit` scoring across architecture, scalability, reliability, security, performance, testing, observability, deployment — evidence-based. | P1 |
-| Git integration       | **Partial.** `git_status`, `git_diff`, `git_commit` tools; host-side hardened git. | Add log/branch/checkout/push; branch/PR workflow (`engineer pr` with title/summary/risks/migration notes); never silently overwrite user changes. | P1 |
-| Multi-agent system    | **Partial.** Fixed planner→coder→reviewer→tester pipeline in one graph. | Coordinator decides when specialized agents (security/perf/testing) add value; parallel execution where safe. | P2 |
+| CLI                   | **Done.** `engineer` entry point with rich TTY UX, streaming, commands (init/index/status, task, review/audit, test, diff/commit/pr, memory, design, analyze, evals). | — | P0 |
+| Repository indexing   | **Done.** `engineer init` / `engineer index`: file discovery, language detection, AST symbol extraction, embeddings, indexer service. | — | P0 |
+| Agent orchestration   | **Done.** `app/orchestrator` (LangGraph), durable transcript, events, retry/cancel; `coder` + `pipeline` + `coordinator` agents. | — | P0 |
+| Tool execution        | **Done.** 16 tools (fs 7, terminal 1, git 7, test 1) via `ToolExecutor` + Docker sandbox. | — | P0 |
+| Memory                | **Done.** Session/project/decision memory, `engineer memory` / `memory list` / `memory clear`. | — | P1 |
+| Architecture analysis | **Done.** `engineer graph` (dependency graph, hubs/cycles/orphans/layers), `engineer arch` (LLM analysis seeded by graph). | — | P1 |
+| Production audit      | **Done.** `engineer audit` staff-engineer + production-readiness scoring with evidence. | — | P1 |
+| Git integration       | **Done.** 7 git tools (status, diff, commit, log, branch, checkout, push); `engineer commit` with LLM message generation; `engineer pr` with LLM-generated title/summary/tests/risks/migration notes + `gh pr create`. | — | P1 |
+| Multi-agent system    | **Done (P2).** Fixed planner→coder→reviewer→tester pipeline + `CoordinatorAgent` dispatching to parallel read-only security/perf specialists and an optional coder, then synthesizing. | Extend specialists (e.g. testing); parallel execution already in place. | P2 |
 | Deployment            | **Partial.** Docker Compose for Postgres/Redis; API + executor Dockerfiles. | K8s manifests, health/autoscaling, CI/CD, observability stack. | P2 |
 
 Supplementary rows (not in the required list but material gaps):
 
 | Capability            | Current State | Target State | Priority |
 | --------------------- | ------------- | ------------ | -------- |
-| Context retrieval     | **Missing.** Agent only sees the whole prompt + tool results; no task-specific context engine. | Select relevant files/classes/methods/config/tests/docs per task; never dump the repo. | P0 |
-| Planning + approval   | **Partial.** Pipeline planner stage emits a plan message; no structured plan, no approval gate. | Structured plan (objective/assumptions/files/deps/risks/validation) + user approval for destructive operations. | P0 |
-| Test execution        | **Missing as a capability.** `terminal_run` can run tests, but no dedicated test tool or parsed results. | Test tool that runs the suite, returns structured pass/fail; test-and-repair loop with retry limits. | P0 |
-| Test-and-repair loop  | **Missing.** Tester verdict only. | Run → analyze failure → fix → retry, bounded; understands compiler/test/lint/type errors. | P0 |
-| Code review agent     | **Partial.** Reviewer pipeline stage returns PASS/CHANGES_NEEDED. | Standalone review with severity/file/line/problem/reason/fix across correctness, security, performance, maintainability, testing. | P1 |
-| Safety controls       | **Partial.** Sandbox, path confinement, timeouts, size caps; **no** confirmation for `rm`, `git reset --hard`, force-push, etc. | Command validation, allow/deny rules, explicit confirmation for destructive commands. | P0 |
-| Semantic/symbol search| **Partial.** `file_search` is glob-only. | Hybrid keyword + semantic + symbol + dependency-graph search. | P0 |
+| Context retrieval     | **Done.** `engineer index` + `ContextAssembler` with keyword search + symbol lookup; feeds ranked context window into the agent loop. | — | P0 |
+| Planning + approval   | **Done.** Structured plan artifact (objective/assumptions/files/deps/risks/validation) + approval gate with `--yes` automation. | — | P0 |
+| Test execution        | **Done.** `test_run` tool runs the suite in the sandbox, parses structured pass/fail output. | — | P0 |
+| Test-and-repair loop  | **Done.** Test-and-repair graph node: analyze failure → fix → re-run, bounded by `test_max_repairs`. | — | P0 |
+| Code review agent     | **Done.** Standalone `engineer review` with severity/file/line/problem/reason/fix across correctness, security, performance, maintainability, testing. | — | P1 |
+| Safety controls       | **Done.** `edit_file` tool, command allow/deny rules, destructive-command confirmation. | — | P0 |
+| Semantic/symbol search| **Done.** `file_search` with ripgrep-style keyword search + AST symbol extraction + dependency-graph context. | — | P0 |
 | LLM provider breadth  | **Partial.** `openai`, `anthropic`, local OpenAI-compatible. | Add Gemini; keep env-driven config. | P1 |
-| Observability         | **Missing.** structlog only. | OTel traces, metrics (LLM/token/latency/cost/tool calls/task success), alerts. | P1 |
-| Evaluation framework  | **Missing.** `app/evals/__init__.py` stub. | Headless benchmark tasks (fix auth bug, add endpoint, add migration, fix test, optimize query, find security issue); store results; model comparison. | P1 |
-| Auth / workspace mgmt | **Missing.** `users` table + `UserRepository` exist; no endpoints. | Register/login/refresh/logout/me; user-scoped workspaces and sessions; ownership checks (was "Phase 9"). | P1 |
-| System design mode    | **Done (P1).** `engineer design "…"` → architecture, APIs, data/event model, caching, failure handling, scaling, observability, Mermaid diagrams. | — | P1 |
-| Distributed systems analysis | **Done (P1).** `engineer analyze` scans for sync/async HTTP, retries, idempotency, concurrency, locking, caching, timeouts, circuit breakers, messaging; `--scan-only` prints the deterministic evidence, otherwise the LLM produces findings + recommendations. | — | P1 |
+| Observability         | **Done.** OTel traces/metrics (LLM calls, tokens, duration, tool calls, task runs, HTTP requests), `InstrumentedLLM` wrapper, HTTP middleware, token-level streaming to CLI via `_TokenSink`. | — | P1 |
+| Evaluation framework  | **Done.** 6 benchmark tasks, headless `EvalRunner`, `ResultStore` (JSONL), `engineer eval list|run|results|compare` CLI. | Expand task suite, multi-model parallel runner, CI integration. | P1 |
+| Auth / workspace mgmt | **Done.** Register/login/refresh/logout/me endpoints; user-scoped workspaces and sessions; ownership checks. | — | P1 |
+| System design mode    | **Done.** `engineer design "…"` → architecture, APIs, data/event model, caching, failure handling, scaling, observability, Mermaid diagrams. | — | P1 |
+| Distributed systems analysis | **Done.** `engineer analyze` scans for sync/async HTTP, retries, idempotency, concurrency, locking, caching, timeouts, circuit breakers, messaging. | — | P1 |
 | Legacy modernization  | **Missing.** | `engineer modernize` → migration plan, risk assessment, rollback strategy; approval before execution. | P2 |
 | MCP integration       | **Missing.** Tool layer is closed. | Design tool layer so MCP-compatible tools can be added (GitHub, Jira, DBs, cloud). | P2 |
 | Web UI / extension    | **Missing.** | React frontend / VS Code extension consuming the same gateway. | P2 |
-| Streaming tokens      | **Partial.** SSE streams per-message events; `LLMStreamEvent` (text/tool_request/usage) is defined but unused. | Token-level streaming to the CLI/UI. | P1 |
+| Streaming tokens      | **Done.** `_TokenSink` + full `on_token` callback chain streams LLM output tokens live to Rich console; configurable via `cli_stream_tokens`. | — | P1 |
 
 ---
 
@@ -137,13 +137,17 @@ Supplementary rows (not in the required list but material gaps):
 
 - `app/orchestrator/orchestrator.py` — durable lifecycle, per-message
   persistence, event emission, retry/cancel, token accounting, agent-type
-  dispatch (`coder`, `pipeline`, unknown → failed task).
+  dispatch (`coder`, `pipeline`, `coordinator`, unknown → failed task).
 - `app/agents/base.py` — `LoopAgent`/`LoopResult`/`RunResult`/`AgentLike`,
-  cooperative cancellation, `on_message` streaming hook.
+  cooperative cancellation, `on_message` streaming hook, `tool_names`
+  allowlist that rejects out-of-allowlist tool requests.
 - `app/agents/pipeline.py` — planner→coder→reviewer→tester with rework
   routing bounded by `pipeline_max_passes`.
-- Gaps to close later (P2): a *coordinator* that selects which agent (or
-  parallel set) a request needs, instead of a fixed agent_type.
+- `app/agents/coordinator.py` — `CoordinatorAgent` dispatches to parallel
+  read-only security/perf specialists (confined to `READ_ONLY_TOOLS`) and an
+  optional coder, then synthesizes one answer.
+- Remaining P2: more specialists (e.g. testing), intent-based agent selection
+  across all modes rather than only the fixed `agent_type` set.
 
 ### 3.4 Tool system (P0) — Done, with listed additions
 
@@ -184,36 +188,55 @@ approval hook. Spec §12/§30 explicitly require these.
   (severity/file/line/problem/reason/suggested fix), no standalone review
   command, and no review of an existing branch (uncommitted work).
 
-### 3.8 Memory (P1) — Missing
+### 3.8 Memory (P1) — Done
 
-- `app/memory/__init__.py` stub. No session/project/decision memory, no
-  persistence, no `engineer memory` UI. Spec §20 open.
+- `app/memory/` — session, project, and decision memory with repository and
+  service layers. `engineer memory`, `memory list`, `memory clear` commands.
+  Orchestrator injects recalled memory into agent context window.
 
-### 3.9 Git workflow (P1) — Partial
+### 3.9 Git workflow (P1) — Done
 
-- Read-only-ish: `git_status`, `git_diff`, `git_commit` (stages all +
-  commits, hooks disabled, no push). No branch/log/checkout/push, no
-  pre-modification working-tree check, no PR generation. Spec §21 open beyond
-  the three tools.
+- 7 git tools fully wired from `ToolName` enum through spec to executor:
+  `git_status`, `git_diff`, `git_commit`, `git_log`, `git_branch`,
+  `git_checkout`, `git_push`.
+- `engineer commit` with `--generate` (LLM-drafts conventional-commit message
+  from diff) and `--message` override.
+- `engineer pr` with LLM-generated title/summary/tests/risks/migration notes,
+  branch push, `.engineer/pr-<branch>.md` save, and `gh pr create` (graceful
+  fallback when `gh` is not installed).
 
-### 3.10 Observability (P1) — Missing
+### 3.10 Observability (P1) — Done
 
-- structlog structured JSON logging (`app/core/logging.py`) is in place and
-  used across modules; readiness/health endpoints exist.
-- No metrics (LLM calls, tokens, latency, cost, tool failures, task success),
-  no OTel, no tracing, no dashboards. `app/monitoring/__init__.py` stub.
-  Spec §23 open.
+- `app/monitoring/` — full OpenTelemetry instrumentation: `TracerProvider` +
+  `MeterProvider` bootstrap, OTLP/HTTP export, `InstrumentedLLM` wrapper
+  (spans + metrics per LLM call), `ObservabilityMiddleware` (HTTP request
+  spans + metrics).
+- Metrics: 4 counters + 4 histograms (LLM calls/tokens/duration, tool calls,
+  task runs/duration, HTTP requests/duration).
+- Token-level streaming: `_TokenSink` renders LLM output tokens live to the
+  Rich console via the `on_token` callback chain.
+- Config: `otel_enabled` (default off, opt-in), `otel_exporter_endpoint`,
+  `otel_traces_enabled`, `otel_metrics_enabled`.
 
-### 3.11 Evaluation framework (P1) — Missing
+### 3.11 Evaluation framework (P1) — Done
 
-- `app/evals/__init__.py` stub ("headless task runner for SWE-bench-style
-  suites"). No benchmark tasks, no harness, no result store, no model
-  comparison. Spec §24 open. This is a headline gap for a portfolio project.
+- `app/evals/` — 6 benchmark tasks (fix-auth-bug, add-rest-endpoint,
+  add-db-migration, fix-failing-test, optimize-query, find-security-issue),
+  `EvalRunner` (scaffold → provision → orchestrator → verify), `ResultStore`
+  (append-only JSONL), `summarize()` for model comparison.
+- CLI: `engineer eval list|run|results|compare` with flags for workspace,
+  keep, timeout, results path, model filter.
+- Tests: unit tests for tasks/runner/results/CLI + integration test against
+  real PostgreSQL.
 
-### 3.12 Multi-agent (P2) — Partial
+### 3.12 Multi-agent (P2) — Done (Phase 18)
 
-- Fixed pipeline exists; no coordinator, no on-demand specialist dispatch, no
-  parallel execution. Spec §22 open beyond the fixed graph.
+- Fixed pipeline (planner→coder→reviewer→tester) exists; the
+  `CoordinatorAgent` adds intent-based dispatch to parallel read-only
+  specialists (security, performance) confined to `READ_ONLY_TOOLS`, an
+  optional sequential coder, and a synthesis step. Spec §22 largely closed;
+  remaining: more specialist roles (e.g. testing) and on-demand mode
+  selection.
 
 ### 3.13 Deployment (P2) — Partial
 

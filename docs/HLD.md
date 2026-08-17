@@ -165,6 +165,11 @@ everything through repositories, never via raw SQL.
   `_route_review`/`_route_test` send non-PASS verdicts back to the coder,
   with rework counted and bounded by `pipeline_max_passes` so the pipeline
   always terminates.
+- The **coordinator** (`CoordinatorAgent`) makes a cheap no-tool dispatch
+  decision, runs read-only security/performance specialists concurrently
+  (each confined to a `READ_ONLY_TOOLS` allowlist via `LoopAgent.tool_names`,
+  so parallel reads can never mutate the workspace), optionally runs a coder
+  sequentially when changes are needed, then synthesizes one answer.
 
 ### 6.4 LLM layer
 
@@ -194,11 +199,12 @@ everything through repositories, never via raw SQL.
 ## 7. Request lifecycle (task run)
 
 ```
-1. POST /sessions/{id}/tasks {"goal": "…", "agent_type": "coder"|"pipeline"}
+1. POST /sessions/{id}/tasks {"goal": "…", "agent_type": "coder"|"pipeline"|"coordinator"}
 2. Gateway: 404 if session missing → create Task (PENDING) → commit → 202
 3. Background: Orchestrator marks RUNNING + started_at → resolves workspace dir
 4. Build ToolExecutor + agent for task.agent_type
-   (coder = single loop; pipeline = planner→coder→reviewer→tester graph);
+   (coder = single loop; pipeline = planner→coder→reviewer→tester graph;
+   coordinator = dispatch → parallel read-only specialists → optional coder → synthesis);
    on_message hook wires persistence+events
 5. Agent loop (per stage, ≤ max_steps; pipeline rework bounded by max_passes):
      a. LLM.complete(transcript, tools, system) → LLMResponse
