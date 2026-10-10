@@ -9,6 +9,14 @@ portfolio-grade AI Software Engineering Agent.
   `infra/`, `alembic/`; `pytest --collect-only` = 150 tests; `ruff`/`mypy`
   clean on 85 source files (~4,740 LOC source, ~3,550 LOC tests).
 
+> **Historical snapshot.** This document captures the gap as it stood at
+> **Phase 8**. The gaps it lists (CLI, retrieval, planning/approval,
+> test-and-repair, memory, human-facing modes, observability, evals, auth, and
+> later legacy modernization, MCP, deployment, and the web UI) have since been
+> closed through **Phase 20** — see **§9 Phase 20 update** at the end for the
+> delta. The capability tables below have been updated in place; the detailed
+> §3–§7 prose is preserved as the original Phase-8 assessment.
+
 > This document describes *what exists today*, *what the target requires*,
 > and the priority of each gap. It deliberately proposes **no source changes**
 > — implementation order is in `TARGET_ARCHITECTURE.md` and must be approved
@@ -76,7 +84,7 @@ The project's **largest gaps are all above the runtime core**:
 | Production audit      | **Done.** `engineer audit` staff-engineer + production-readiness scoring with evidence. | — | P1 |
 | Git integration       | **Done.** 7 git tools (status, diff, commit, log, branch, checkout, push); `engineer commit` with LLM message generation; `engineer pr` with LLM-generated title/summary/tests/risks/migration notes + `gh pr create`. | — | P1 |
 | Multi-agent system    | **Done (P2).** Fixed planner→coder→reviewer→tester pipeline + `CoordinatorAgent` dispatching to parallel read-only security/perf specialists and an optional coder, then synthesizing. | Extend specialists (e.g. testing); parallel execution already in place. | P2 |
-| Deployment            | **Partial.** Docker Compose for Postgres/Redis; API + executor Dockerfiles. | K8s manifests, health/autoscaling, CI/CD, observability stack. | P2 |
+| Deployment            | **Done (P2).** Compose for Postgres/Redis; API + executor Dockerfiles; GitHub Actions CI (`ruff`/`mypy`/unit tests) + release (GHCR on `v*`); Kustomize K8s base (`deploy/k8s/`, migration initContainer, health probes) with `make deploy`. | Autoscaling/Helm beyond the Kustomize base. | P2 |
 
 Supplementary rows (not in the required list but material gaps):
 
@@ -89,15 +97,15 @@ Supplementary rows (not in the required list but material gaps):
 | Code review agent     | **Done.** Standalone `engineer review` with severity/file/line/problem/reason/fix across correctness, security, performance, maintainability, testing. | — | P1 |
 | Safety controls       | **Done.** `edit_file` tool, command allow/deny rules, destructive-command confirmation. | — | P0 |
 | Semantic/symbol search| **Done.** `file_search` with ripgrep-style keyword search + AST symbol extraction + dependency-graph context. | — | P0 |
-| LLM provider breadth  | **Partial.** `openai`, `anthropic`, local OpenAI-compatible. | Add Gemini; keep env-driven config. | P1 |
+| LLM provider breadth  | **Done.** `openai`, `anthropic`, `gemini`, local OpenAI-compatible; env-driven via `LLM_PROVIDER`. | — | P1 |
 | Observability         | **Done.** OTel traces/metrics (LLM calls, tokens, duration, tool calls, task runs, HTTP requests), `InstrumentedLLM` wrapper, HTTP middleware, token-level streaming to CLI via `_TokenSink`. | — | P1 |
 | Evaluation framework  | **Done.** 6 benchmark tasks, headless `EvalRunner`, `ResultStore` (JSONL), `engineer eval list|run|results|compare` CLI. | Expand task suite, multi-model parallel runner, CI integration. | P1 |
 | Auth / workspace mgmt | **Done.** Register/login/refresh/logout/me endpoints; user-scoped workspaces and sessions; ownership checks. | — | P1 |
 | System design mode    | **Done.** `engineer design "…"` → architecture, APIs, data/event model, caching, failure handling, scaling, observability, Mermaid diagrams. | — | P1 |
 | Distributed systems analysis | **Done.** `engineer analyze` scans for sync/async HTTP, retries, idempotency, concurrency, locking, caching, timeouts, circuit breakers, messaging. | — | P1 |
-| Legacy modernization  | **Missing.** | `engineer modernize` → migration plan, risk assessment, rollback strategy; approval before execution. | P2 |
-| MCP integration       | **Missing.** Tool layer is closed. | Design tool layer so MCP-compatible tools can be added (GitHub, Jira, DBs, cloud). | P2 |
-| Web UI / extension    | **Missing.** | React frontend / VS Code extension consuming the same gateway. | P2 |
+| Legacy modernization  | **Done.** `engineer modernize [--target ...]` seeds the LLM with the dependency graph → ordered migration steps + risks (`ModernizationReport`). | — | P2 |
+| MCP integration       | **Done.** `mcp_call` tool + `app/mcp` (stdio JSON-RPC 2.0 client, server manager); `engineer mcp list`. | — | P2 |
+| Web UI / extension    | **Partial.** Gateway serves a dependency-free SPA at `/ui` (auth, workspaces/sessions, task create + transcript polling). | VS Code extension (browser case is covered). | P2 |
 | Streaming tokens      | **Done.** `_TokenSink` + full `on_token` callback chain streams LLM output tokens live to Rich console; configurable via `cli_stream_tokens`. | — | P1 |
 
 ---
@@ -326,3 +334,33 @@ modes and interfaces (P2).
 
 See `docs/TARGET_ARCHITECTURE.md` for the module mapping and the phased
 implementation plan.
+
+---
+
+## 9. Phase 20 update
+
+Every gap in §1 above was closed between Phase 9 and Phase 20. Delta since the
+original audit:
+
+| Area | Status | Where |
+|------|--------|-------|
+| CLI | Done | `app/cli`, `engineer` console script |
+| Retrieval + semantic search | Done | `app/retrieval` (`embedder.py`, `retriever.py`, `context.py`, `indexer.py`); pgvector `embedding_search` |
+| Memory (with embeddings) | Done | `app/memory/service.py` |
+| Planning + approval | Done | orchestrator plan/approve/reject |
+| Test-and-repair | Done | `app/agents/repair.py` + `test_run` |
+| Human-facing modes | Done | `app/review`, `app/audit`, `app/architecture`, `app/design`, `app/analysis`, `app/git` |
+| Observability | Done | `app/monitoring` |
+| Evals | Done | `app/evals` |
+| Auth + ownership | Done | `app/gateway/routes/auth.py`, dependency ownership checks |
+| LLM breadth | Done | Gemini added (`app/llm/clients/gemini.py`) |
+| Legacy modernization | Done | `app/modernization` |
+| MCP integration | Done | `app/mcp`, `mcp_call` tool |
+| Deployment | Done | `.github/workflows/{ci,release}.yml`, `deploy/k8s/` |
+| Web UI | Partial | `/ui` SPA in `app/gateway/routes/ui.py` (VS Code extension not built) |
+
+**Current metrics (Phase 20):** 122 source files, 57 test files, 22 packages,
+**642 tests** (541 unit + 101 integration), `ruff` and `mypy --strict` clean.
+
+**Remaining:** a VS Code extension (browser UI already ships at `/ui`) and
+autoscaling beyond the Kustomize base.

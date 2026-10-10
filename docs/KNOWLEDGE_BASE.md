@@ -9,17 +9,17 @@ state of the work. It is the single reference for resuming the session.
 
 | | |
 |---|---|
-| **Repo** | `/Users/shreeshsrivastava/Downloads/projects/AI Engineer/coding-agent` (note: `coding-agent`, not "codingagnet") |
-| **Git branch** | `main`, **8 commits ahead of `origin/main`** (unpushed: Phases 14–17 + 3 commits) |
+| **Repo** | `C:\Users\Administrator\Downloads\AI-Engineer` (project name: `coding-agent`, not "codingagnet") |
+| **Git branch** | `main`; Phases 18–20 changes are **uncommitted** in this session |
 | **Python** | 3.13, `asyncio` (single event loop per CLI run) |
-| **Dependencies** | FastAPI, SQLAlchemy 2 async + Alembic, PostgreSQL (pgvector), Redis, LangGraph, Pydantic v2, structlog, OpenTelemetry, rich (CLI), httpx |
+| **Dependencies** | FastAPI, SQLAlchemy 2 async + Alembic, PostgreSQL (pgvector), Redis, LangGraph, Pydantic v2, structlog, OpenTelemetry, rich (CLI), httpx, google-genai |
 | **Infra** | `docker compose` (PostgreSQL + Redis), `infra/executor/Dockerfile` sandbox image |
-| **Status line** | Phase 18 (coordinator + parallel agents) complete; all P0 and P1 items done; P2 item 16 done |
+| **Status line** | Phase 20 (web UI) complete; all P0/P1/P2 items done except a VS Code extension |
 
-The repo was previously at `~/Documents/Default Project` in an opencode
-session; the real working directory is the Downloads repo. The opencode
-working directory (`~/Documents/Default Project`) only ever held
-`opencode.json` — all project work happens in the Downloads repo.
+The repo was previously tracked on macOS at `~/Downloads/projects/AI Engineer/coding-agent`
+and is now worked in at `C:\Users\Administrator\Downloads\AI-Engineer` on Windows.
+All project work happens in the repo root; the opencode working directory only
+holds `opencode.json`.
 
 ## 2. Architecture
 
@@ -27,7 +27,7 @@ A **modular monolith**: one deployable with strictly separated feature
 packages, extractable into services later.
 
 ```
-React frontend  ->  Gateway (auth, rate-limit, WS)  ->  Orchestrator (LangGraph)
+Web UI (/ui) / CLI  ->  Gateway (auth, rate-limit, WS)  ->  Orchestrator (LangGraph)
                                                       | agents (planner/coder/reviewer/tester)
                                                       v tools -> Executor (sandboxed containers)
                                                       | retrieval (AST + embeddings)
@@ -57,6 +57,8 @@ React frontend  ->  Gateway (auth, rate-limit, WS)  ->  Orchestrator (LangGraph)
 | `architecture` | dependency graph + LLM architecture analysis | 15 |
 | `design` | system-design mode with Mermaid diagrams | 16 |
 | `analysis` | distributed-systems concern scan + LLM analysis | 17 |
+| `modernization` | legacy modernization plan + risk findings | 17 |
+| `mcp` | MCP stdio client + server manager | 18 |
 
 ## 3. Conversation timeline (oldest → newest)
 
@@ -87,9 +89,18 @@ orchestrator, agents, llm) and predate the visible git log.
 | `5fe4991` | 15 | **Dependency graph + LLM architecture analysis**: `app/architecture/` (`deps`, `render`, `report`); fixed 3 `deps.py` bugs (DependencyEdge `order=True`, TS `./x` resolution, Python absolute-import tree search); `engineer graph` (text/`--mermaid`/`--include-unresolved`/`--max-nodes`/focus node/`--depth`) + `engineer arch` |
 | `1748c76` | 16 | **System-design mode** (`engineer design "<goal>"`): `app/design/` (`DesignReport`: summary, assumptions, architecture, components, API, data model, events, caching, failure handling, scaling, observability, Mermaid, risks); repo-independent (works outside a bound workspace) |
 | `bad4421` | 17 | **Distributed-systems analysis** (`engineer analyze`): `app/analysis/` (`scan.py` deterministic concern scanner for sync/async HTTP, retries, idempotency, concurrency, locking, caching, timeouts, circuit breakers, messaging; `report.py` LLM interpretation into `AnalysisReport` with `ReviewFinding` findings + recommendations); `--scan-only` skips the LLM |
+| _(uncommitted)_ | — | **Gemini provider**: `app/llm/clients/gemini.py` (`GeminiClient`), wired into `factory.py` (`anthropic`/`openai`/`gemini`); `google-genai` runtime dep |
+| _(uncommitted)_ | — | **Embeddings + semantic search**: `app/retrieval/embedder.py` (`Embedder`, `HashingEmbedder` offline, `OpenAIEmbedder`, `build_embedder`, `cosine_similarity`); retriever/memory/service blend semantic similarity; `CodeChunkRepository.embedding_search`; indexer/memory populate pgvector. Fixed ruff B905 (`strict=True`) and a mypy loop-var shadowing bug |
+| _(uncommitted)_ | 17 | **Legacy modernization**: `app/modernization/` (`ModernizationReport`, `build_modernization_seed`, `parse_modernization_report`, `render_modernization`) + `engineer modernize` (graph-seeded, plan-only) |
+| _(uncommitted)_ | 18 | **MCP integration**: `app/mcp/` (`config`, `client` stdio JSON-RPC 2.0, `manager`); `mcp_call` tool + `ToolName.MCP_CALL`; executor `mcp` wiring; `engineer mcp list` |
+| _(uncommitted)_ | 19 | **Deployment**: `.github/workflows/{ci,release}.yml`, `deploy/k8s/*` (Kustomize), `make deploy`/`deploy-delete`, `pyyaml` dev dep |
+| _(uncommitted)_ | 20 | **Web UI**: `app/gateway/routes/ui.py` + `/ui` SPA (auth, workspaces/sessions, task create, transcript polling), wired in `main.py` without the API prefix |
 
-**Git state note:** `origin/main` is at `4d9a558` (auth). Commits
-`d3a6334` → `bad4421` (8 commits) are local-only as of this KB.
+**Git state note:** `origin/main` is at `4d9a558` (auth); commits
+`d3a6334` → `bad4421` (8 commits) were local-only as of the original KB.
+**This session added Phases 18–20 plus Gemini/embeddings/modernization as
+uncommitted working-tree changes on Windows — no commits were created** (the
+user had not asked for commits).
 
 ## 4. Recurring patterns and conventions
 
@@ -167,35 +178,46 @@ engineer graph [node] [--mermaid] [--include-unresolved] [--max-nodes] [--depth]
 engineer arch [--mermaid]
 engineer design "<goal>"              # repo-independent
 engineer analyze [--scan-only]
+engineer modernize [--target "..."]   # legacy modernization plan (graph-seeded)
+engineer mcp list                     # configured MCP servers + tools
 engineer memory add|list|recall|clear [--kind]
 engineer eval list|run|results|compare [--model]
 ```
 
 ## 6. Known issues / caveats
 
-- `make lint` format-check is **red on pre-existing files**: `app/agents/pipeline.py`
-  and `tests/unit/test_security.py` have formatting drift untouched by
-  recent phases (verified via `git stash`). `ruff check` and `mypy` are
-  clean.
+- `ruff check` / `ruff format --check` over `app` + `tests` and `mypy app` are
+  **green** (the prior `pipeline.py` / `test_security.py` format drift was
+  reformatted in this session). On Windows, 7–8 unit tests fail due to CRLF
+  `file_read` output and Windows git output format — environment artifacts,
+  not bugs.
 - Local LLM config in `.env`/`.env.example` points at the opencode zen
   endpoint (model `big-pickle`). Tests never hit the network (`FakeLLM`).
+- Embeddings default to `HashingEmbedder` (`EMBEDDING_PROVIDER=hash`, offline);
+  `OpenAIEmbedder` is opt-in. pgvector columns are populated when an embedder
+  is configured.
 - The `async_http` scan pattern in `app/analysis/scan.py` requires an
   HTTP-ish client identifier (client/session/http/connector/api/svc/
   service/sdk/gateway) to avoid flagging `container.delete(...)` etc.
 
 ## 7. Roadmap
 
-All P0 and P1 items are complete. P2 item 16 (coordinator) is also done.
-Remaining P2: legacy modernization / security / perf analysis modes (item 17);
-MCP tool integration (item 18); deployment CI/CD + K8s (item 19); Web UI /
-VS Code extension (item 20).
+All P0 and P1 items are complete, as are P2 items 16 (coordinator),
+17 (legacy modernization), 18 (MCP integration), 19 (deployment CI/CD + K8s),
+and 20 (web UI). The only remaining P2 item is a **VS Code extension** (the
+browser UI already ships at `/ui`) plus optional autoscaling/Helm.
 
-Suggested next step from this session: P2 items — confirm scope before starting.
+Suggested next step from this session: none required — scope is closed except
+an optional VS Code extension.
 
 ## 8. Working agreements for this session
 
-- Work only in `/Users/shreeshsrivastava/Downloads/projects/AI Engineer/coding-agent`.
-- Verify with `make lint`/`make typecheck`/`make test-unit`; expect the two
-  pre-existing format failures noted in §6.
-- Commit per phase with `feat: <summary> (Phase N)`; do not push unless asked.
+- Work only in `C:\Users\Administrator\Downloads\AI-Engineer` (Windows).
+  Prepend `C:\Program Files\Git\cmd` and the Python 3.13 dir to `PATH` per
+  command; use `& ".venv\Scripts\python.exe" -m ...`.
+- Verify with `ruff check app tests`, `ruff format --check app tests`,
+  `mypy app`, and `pytest -m "not integration"`; expect the 7–8 Windows-only
+  failures noted in §6.
+- Commit per phase with `feat: <summary> (Phase N)` **only when asked**; do
+  not push unless asked.
 - Ask before touching infra (docker), migrations, or dependency files.

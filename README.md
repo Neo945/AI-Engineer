@@ -5,8 +5,8 @@ plans work, edits files, runs commands and tests, reviews its own output,
 and deploys — the architecture lineage of Cursor Agent, Claude Code, Devin,
 and GitHub Copilot Workspace.
 
-**Status:** Phase 17 (distributed-systems analysis) complete. The provider-agnostic
-LLM abstraction (Anthropic, OpenAI, OpenAI-compatible local backends),
+**Status:** All planned phases complete (through Phase 20). The provider-agnostic
+LLM abstraction (Anthropic, OpenAI, Gemini, OpenAI-compatible local backends),
 LangGraph agents, the orchestrator, and the gateway task API exist and are
 tested. Tasks run **asynchronously** (`POST /sessions/{id}/tasks` returns
 `202`), the orchestrator persists the transcript **incrementally** and
@@ -51,6 +51,20 @@ generates a full design document for a goal — architecture, components, API
 contracts, data/event model, caching, failure handling, scaling,
 observability, and Mermaid diagrams — and runs outside any bound workspace.
 
+Retrieval supports **semantic search**: an `Embedder` abstraction
+(`HashingEmbedder` fully offline, or `OpenAIEmbedder`) embeds indexed code
+chunks and memory entries into pgvector, and the retriever/memory service blend
+cosine similarity into their keyword+symbol ranking. A **legacy modernization
+mode** (`engineer modernize [--target ...]`) seeds the LLM with the dependency
+graph to produce an ordered migration plan and risk findings. A **Model Context
+Protocol** bridge (`mcp_call` tool, configured via `MCP_SERVERS_FILE`) lets
+agents call external MCP servers (GitHub, Jira, DBs, cloud) over stdio JSON-RPC,
+with isolated per-server failures; `engineer mcp list` shows the configured
+servers and their tools. Deployment ships as **GitHub Actions CI/release
+workflows** plus **Kustomize Kubernetes manifests** (`deploy/k8s/`, `make deploy`).
+Finally a **zero-dependency web UI** is served by the gateway at `/ui` — sign in,
+manage workspaces/sessions, create tasks, and watch each task's transcript.
+
 ## Architecture
 
 A **modular monolith**: one deployable containing strictly separated
@@ -58,7 +72,7 @@ feature packages, so individual services can be extracted later if load
 demands.
 
 ```
-React frontend  ->  Gateway (auth, rate-limit, WS)  ->  Orchestrator (LangGraph)
+Web UI (/ui) / CLI  ->  Gateway (auth, rate-limit, WS)  ->  Orchestrator (LangGraph)
                                                           | agents (planner/coder/reviewer/tester)
                                                           v tools -> Executor (sandboxed containers)
                                                           | retrieval (AST + embeddings)
@@ -229,6 +243,59 @@ structured findings (severity/file/line/problem/reason/fix, matching the
 review and audit modes), and recommendations. Parsing degrades gracefully: a
 prose reply still yields a summary and any recoverable findings.
 
+## Legacy modernization
+
+`engineer modernize` seeds the LLM with the workspace's deterministic
+dependency graph and asks for an ordered, low-risk migration plan:
+
+```bash
+engineer modernize
+engineer modernize --target "Python 3.13 + FastAPI"
+```
+
+The model returns a `ModernizationReport` — summary, ordered migration steps,
+and risks reusing the shared `ReviewFinding` schema — rendered as Markdown.
+Parsing degrades gracefully (a prose reply still yields a summary).
+
+## MCP integration
+
+`mcp_call` lets agents call external [Model Context Protocol](https://modelcontextprotocol.io)
+servers (GitHub, Jira, databases, cloud APIs) over stdio JSON-RPC 2.0. Point
+`MCP_SERVERS_FILE` at a JSON file describing servers and set `MCP_ENABLED=true`:
+
+```bash
+engineer mcp list   # show configured servers and the tools they expose
+```
+
+A failing server is isolated: its calls return an error while the others keep
+working, and an unconfigured `MCP_CALL` returns a friendly message rather than
+crashing the run.
+
+## Web UI
+
+The gateway serves a dependency-free single-page app at `/ui`:
+
+```
+http://localhost:8000/ui
+```
+
+Sign in (or register), pick or create a workspace and session, submit a goal,
+and watch the task's transcript update live — the page polls the task-detail
+endpoint until the task reaches a terminal state, all against the same
+`/api/v1` JSON API.
+
+## Deployment
+
+```bash
+make deploy         # kubectl apply -k deploy/k8s
+make deploy-delete  # kubectl delete -k deploy/k8s
+```
+
+CI (`.github/workflows/ci.yml`) runs lint, format, `mypy app`, and unit tests;
+releases (`.github/workflows/release.yml`) build and push to GHCR on `v*` tags.
+The Kustomize base in `deploy/k8s/` includes Postgres (pgvector), Redis, the API
+(with a migration initContainer and health probes), and an ingress.
+
 ## Git workflow
 
 Agents can drive the repository themselves: `git_log`, `git_branch`,
@@ -283,3 +350,5 @@ make test-unit  # unit tests only, no infra required
 | `architecture`   | dependency graph + LLM architecture analysis         | 15    |
 | `design`         | system-design mode with Mermaid diagrams             | 16    |
 | `analysis`       | distributed-systems concern scan + LLM analysis      | 17    |
+| `modernization`  | legacy modernization plan + risk findings             | 17    |
+| `mcp`            | Model Context Protocol client + server manager        | 18    |
