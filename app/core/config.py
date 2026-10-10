@@ -162,7 +162,7 @@ class Settings(BaseSettings):
     test_max_repairs: int = Field(default=2, ge=0)
     test_command: str | None = None
 
-    coordinator_max_specialists: int = Field(default=2, ge=1)
+    coordinator_max_specialists: int = Field(default=3, ge=1)
 
     retrieval_enabled: bool = True
     retrieval_max_chunks: int = Field(default=20, ge=1)

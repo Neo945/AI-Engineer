@@ -286,6 +286,54 @@ async def test_coordinator_no_specialists_no_changes() -> None:
     assert [m.content for m in result.messages] == ["Assess", "Final: nothing to do."]
 
 
+async def test_coordinator_runs_testing_specialist() -> None:
+    script = [
+        _dispatch_json({"specialists": ["testing"], "needs_changes": False}),
+        _final_response("Testing: no coverage for the error path."),
+        _final_response("Final: add a test for the error path."),
+    ]
+    agent = _coordinator(script)
+
+    result = await agent.run("Review test coverage")
+
+    assert result.specialists_run == ("testing",)
+    assert result.decision.specialists == ["testing"]
+    assert "testing" in SPECIALISTS
+
+
+async def test_coordinator_unparseable_dispatch_uses_keyword_hints() -> None:
+    script = [
+        _final_response("Sure, I'll take a look at that."),
+        _final_response("Security: no issues found."),
+        _final_response("Final: clean."),
+    ]
+    agent = _coordinator(script)
+
+    result = await agent.run("Review the security of the parser")
+
+    assert result.specialists_run == ("security",)
+    assert result.decision.specialists == ["security"]
+    assert result.decision.needs_changes is False
+    assert "keyword hints" in result.decision.reason
+
+
+async def test_coordinator_unparseable_dispatch_no_keywords_runs_all() -> None:
+    script = [
+        _final_response("Hmm, not sure."),
+        _final_response("Security: fine."),
+        _final_response("Performance: fine."),
+        _final_response("Testing: fine."),
+        _final_response("Final: all clear."),
+    ]
+    agent = _coordinator(script)
+
+    result = await agent.run("Assess the repository")
+
+    assert set(result.specialists_run) == set(SPECIALISTS)
+    assert result.decision.needs_changes is False
+    assert "defaulting to read-only analysis" in result.decision.reason
+
+
 # --- LoopAgent tool allowlist ---------------------------------------------
 
 

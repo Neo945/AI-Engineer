@@ -93,7 +93,7 @@ def test_parser_run_defaults() -> None:
     parser = build_parser()
     args = parser.parse_args(["run", "fix", "the", "test"])
     assert args.command == "run"
-    assert args.agent_type == "coder"
+    assert args.agent_type == "auto"
     assert args.goal == ["fix", "the", "test"]
     assert args.yes is False
 
@@ -105,6 +105,9 @@ def test_parser_run_defaults() -> None:
 
     coordinator = parser.parse_args(["run", "--agent-type", "coordinator", "go"])
     assert coordinator.agent_type == "coordinator"
+
+    auto = parser.parse_args(["run", "--agent-type", "auto", "go"])
+    assert auto.agent_type == "auto"
 
     with pytest.raises(SystemExit):
         parser.parse_args(["run", "--agent-type", "debugger", "go"])

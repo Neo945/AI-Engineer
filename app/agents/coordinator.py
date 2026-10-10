@@ -2,18 +2,20 @@
 
 The coordinator is the P2 "coordinator + parallel agents" mode. Given a goal
 it first makes a cheap no-tool LLM decision on two things: which read-only
-specialists are worth running (security, performance) and whether the goal
-requires modifying the repository. Read-only specialists run **concurrently**
-over the same seed conversation, each confined to a read-only tool allowlist
-so they can never mutate the workspace. When changes are needed, a coder
-agent then implements them sequentially over the accumulated transcript (so
-reads and writes never race). A final synthesis call aggregates everything
-into one answer for the user.
+specialists are worth running (security, performance, testing) and whether
+the goal requires modifying the repository. Read-only specialists run
+**concurrently** over the same seed conversation, each confined to a
+read-only tool allowlist so they can never mutate the workspace. When changes
+are needed, a coder agent then implements them sequentially over the
+accumulated transcript (so reads and writes never race). A final synthesis
+call aggregates everything into one answer for the user.
 
 The decision parse degrades gracefully: an unparseable dispatch reply falls
-back to read-only analysis (both specialists, no changes) so the coordinator
-never edits files it was not asked to edit. Specialist failures are captured
-as a transcript entry rather than failing the whole run.
+back to the deterministic intent classifier (:func:`app.agents.intent.
+classify_intent`), which seeds the specialist selection from the goal's
+keywords — so the coordinator never edits files it was not asked to edit and
+still picks sensible specialists without a usable dispatch reply. Specialist
+failures are captured as a transcript entry rather than failing the whole run.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from app.agents.base import DEFAULT_MAX_STEPS, LoopAgent, TokenHandler
 from app.agents.coder import CoderAgent
+from app.agents.intent import Intent, classify_intent
 from app.executor.executor import ToolExecutor
 from app.llm.messages import ChatMessage, ChatRole
 from app.llm.protocol import LLMProvider, LLMResponse
@@ -61,8 +64,9 @@ _DISPATCH_PROMPT = (
     "You are the coordinator of a team of coding agents. Given the user's "
     "goal, decide (1) which read-only specialists would add value and "
     "(2) whether the goal requires modifying the repository. Available "
-    "specialists: security (vulnerability review) and performance (latency "
-    "and scalability review). Both are read-only and can run in parallel. "
+    "specialists: security (vulnerability review), performance (latency "
+    "and scalability review), and testing (test quality and coverage "
+    "review). All are read-only and can run in parallel. "
     "Reply with only a JSON object inside a fenced code block, like:\n"
     "```json\n"
     '{"specialists": ["security", "performance"], "needs_changes": false, '
@@ -75,12 +79,13 @@ _DISPATCH_PROMPT = (
 
 _SYNTHESIS_PROMPT = (
     "You are a staff engineering lead. The conversation below contains a "
-    "user goal, optional read-only specialist analyses (security and/or "
-    "performance), and possibly a coder's changes. Produce a single, "
-    "well-organized final answer for the user: a concise summary of the "
-    "findings and/or changes, concrete severity-ranked issues with file "
-    "references when applicable, and clear next steps. Do not invent issues "
-    "the evidence does not support. Do not call any tools; just answer."
+    "user goal, optional read-only specialist analyses (security, "
+    "performance, and/or testing), and possibly a coder's changes. Produce "
+    "a single, well-organized final answer for the user: a concise summary "
+    "of the findings and/or changes, concrete severity-ranked issues with "
+    "file references when applicable, and clear next steps. Do not invent "
+    "issues the evidence does not support. Do not call any tools; just "
+    "answer."
 )
 
 _SECURITY_PROMPT = (
@@ -102,6 +107,17 @@ _PERFORMANCE_PROMPT = (
     "file, line, expected impact, and a suggested fix. You may only read "
     "files and git history; you must not modify anything or run mutating "
     "commands. If the code looks fine, say so explicitly."
+)
+
+_TESTING_PROMPT = (
+    "You are a read-only testing reviewer working inside a user's "
+    "repository. Inspect the code and its tests for quality and gaps: "
+    "untested or under-tested paths, missing edge/error cases, over-mocked "
+    "or tautological assertions, flaky or order-dependent tests, and "
+    "coverage blind spots. List each concrete finding with its file, line, "
+    "why it matters, and a suggested test to add. You may only read files "
+    "and git history; you must not modify anything or run tests or other "
+    "commands. If the test suite looks solid, say so explicitly."
 )
 
 
@@ -131,6 +147,11 @@ SPECIALISTS: dict[str, Specialist] = {
         description="latency and scalability review",
         system_prompt=_PERFORMANCE_PROMPT,
     ),
+    "testing": Specialist(
+        name="testing",
+        description="test quality and coverage review",
+        system_prompt=_TESTING_PROMPT,
+    ),
 }
 
 
@@ -149,13 +170,13 @@ class DispatchDecision(BaseModel):
     reason: str = ""
 
 
-def parse_dispatch(text: str) -> DispatchDecision:
+def parse_dispatch(text: str, *, fallback: DispatchDecision | None = None) -> DispatchDecision:
     """Parse a dispatch reply into a :class:`DispatchDecision`.
 
     Prefers a fenced or bare JSON object; unknown specialist names are
-    dropped and duplicates removed. An unparseable reply falls back to
-    read-only analysis (both specialists, no changes) so the coordinator
-    degrades to "analyze, don't modify".
+    dropped and duplicates removed. When the reply cannot be parsed the
+    ``fallback`` decision is returned (defaulting to read-only analysis with
+    every specialist) so the coordinator degrades to "analyze, don't modify".
     """
     payload = _extract_json_object(text)
     if payload is not None:
@@ -165,6 +186,8 @@ def parse_dispatch(text: str) -> DispatchDecision:
             decision = None
         if decision is not None:
             return _coerce_decision(decision)
+    if fallback is not None:
+        return fallback
     return DispatchDecision(
         specialists=list(SPECIALISTS),
         reason="dispatch reply was not parseable; defaulting to read-only analysis",
@@ -226,7 +249,7 @@ class CoordinatorAgent:
         on_token: TokenHandler | None = None,
         stream: bool = False,
         should_cancel: Callable[[], bool] | None = None,
-        max_specialists: int = 2,
+        max_specialists: int = 3,
     ) -> None:
         self._llm = llm
         self._executor = executor
@@ -267,7 +290,8 @@ class CoordinatorAgent:
         for message in seeded:
             await self._invoke_on_message(message)
 
-        decision, dispatch_in, dispatch_out = await self._dispatch(seeded)
+        hints = classify_intent(goal)
+        decision, dispatch_in, dispatch_out = await self._dispatch(seeded, hints)
         transcript = list(seeded)
         total_in = dispatch_in
         total_out = dispatch_out
@@ -347,8 +371,15 @@ class CoordinatorAgent:
     async def _dispatch(
         self,
         messages: Sequence[ChatMessage],
+        hints: Intent,
     ) -> tuple[DispatchDecision, int, int]:
-        """Classify the goal and return the decision plus its token usage."""
+        """Classify the goal and return the decision plus its token usage.
+
+        An unparseable LLM reply falls back to the deterministic keyword
+        hints (read-only, so the coordinator never edits unrequested files);
+        when the classifier finds no specialist keywords, every read-only
+        specialist runs (the original "analyze, don't modify" degradation).
+        """
         await self._check_cancel()
         response = await self._llm.complete(
             messages,
@@ -357,8 +388,20 @@ class CoordinatorAgent:
             max_tokens=self._max_tokens,
             temperature=self._temperature,
         )
+        if hints.specialists:
+            fallback = DispatchDecision(
+                specialists=list(hints.specialists),
+                needs_changes=False,
+                reason=f"dispatch reply was not parseable; using keyword hints ({hints.reason})",
+            )
+        else:
+            fallback = DispatchDecision(
+                specialists=list(SPECIALISTS),
+                needs_changes=False,
+                reason="dispatch reply was not parseable; defaulting to read-only analysis",
+            )
         return (
-            parse_dispatch(response.content),
+            parse_dispatch(response.content, fallback=fallback),
             response.usage.input_tokens,
             response.usage.output_tokens,
         )

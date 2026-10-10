@@ -86,9 +86,9 @@ def build_parser() -> ArgumentParser:
     run = subparsers.add_parser("run", help="plan a goal, then run it after approval")
     run.add_argument(
         "--agent-type",
-        choices=("coder", "pipeline", "coordinator"),
-        default="coder",
-        help="which agent to run (default: coder)",
+        choices=("auto", "coder", "pipeline", "coordinator"),
+        default="auto",
+        help="which agent to run; auto picks from the goal (default: auto)",
     )
     run.add_argument(
         "-y",

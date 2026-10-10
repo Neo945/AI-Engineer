@@ -25,6 +25,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from app.agents.base import DEFAULT_MAX_STEPS, LoopAgent
+from app.agents.intent import classify_intent
 from app.agents.pipeline import REVIEWER_PROMPT
 from app.agents.planning import TaskPlan, format_plan
 from app.agents.repair import RepairAgent
@@ -356,14 +357,16 @@ async def cmd_run(
     goal = goal.strip()
     if not goal:
         raise CliError("goal is empty")
-    if agent_type not in {"coder", "pipeline", "coordinator"}:
+    requested = agent_type.strip().lower()
+    resolved = classify_intent(goal).agent_type if requested == "auto" else requested
+    if resolved not in {"coder", "pipeline", "coordinator"}:
         raise CliError(f"unsupported agent_type: {agent_type}")
 
     async with ctx.db_session() as session:
         task = await TaskRepository(session).add(
             Task(
                 session_id=state.session_id,
-                agent_type=agent_type,
+                agent_type=resolved,
                 goal=goal,
                 max_attempts=ctx.settings.task_max_attempts,
             )
@@ -371,7 +374,8 @@ async def cmd_run(
         await session.commit()
         task_id = task.id
 
-    ctx.console.print(f"[bold cyan]▶[/] {goal}  [dim]({agent_type})[/]")
+    label = f"auto → {resolved}" if requested == "auto" else resolved
+    ctx.console.print(f"[bold cyan]▶[/] {goal}  [dim]({label})[/]")
     sink = _TokenSink(ctx.console)
     orchestrator = ctx.make_orchestrator(
         on_token=sink.feed,

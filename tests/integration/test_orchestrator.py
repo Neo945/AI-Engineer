@@ -652,6 +652,36 @@ async def test_run_task_runs_coordinator(
     ]
 
 
+async def test_run_task_resolves_auto_agent_type(
+    container: Container,
+    db_session: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    task = await _seed_task(
+        db_session,
+        workspace_dir=str(tmp_path),
+        agent_type="auto",
+        goal="Review the security of the auth flow",
+    )
+    fake = FakeLLM(
+        [
+            _final_response('{"specialists": ["security"], "needs_changes": false}'),
+            _final_response("Security: no issues found."),
+            _final_response("Final: clean bill of health."),
+        ]
+    )
+    orchestrator = await _build_orchestrator(container, llm=fake, events=[])
+
+    await orchestrator.run_task(task.id)
+
+    async with container.session_factory() as fresh:
+        done = await TaskRepository(fresh).get(task.id)
+    assert done is not None
+    assert done.status == TaskStatus.COMPLETED
+    # "auto" was resolved and persisted as the coordinator agent type.
+    assert done.agent_type == "coordinator"
+
+
 async def test_run_task_fails_unsupported_agent_type(
     container: Container,
     db_session: AsyncSession,

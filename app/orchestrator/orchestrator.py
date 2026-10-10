@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agents.base import AgentLike, TokenHandler
 from app.agents.coder import CoderAgent
 from app.agents.coordinator import CoordinatorAgent
+from app.agents.intent import resolve_agent_type
 from app.agents.pipeline import PipelineAgent
 from app.agents.planner import PlannerAgent
 from app.agents.planning import TaskPlan, format_plan
@@ -136,9 +137,9 @@ class Orchestrator:
         ``coder`` runs the single coder loop; ``pipeline`` runs the composed
         planner → coder → reviewer → tester pipeline over the same transcript;
         ``coordinator`` dispatches the goal to parallel read-only specialists
-        (security/performance), optionally runs a coder for changes, and
-        synthesizes one answer. Unknown types raise a ``ValueError`` that the
-        caller turns into a failed task.
+        (security/performance/testing), optionally runs a coder for changes,
+        and synthesizes one answer. Unknown types raise a ``ValueError`` that
+        the caller turns into a failed task.
         """
         should_cancel = self._cancel_checked(task.id)
         if task.agent_type == "pipeline":
@@ -206,6 +207,10 @@ class Orchestrator:
                 raise ValueError("task plan awaits approval before it can run")
             if task.plan_approved is False:
                 raise ValueError("task plan was rejected")
+
+            # "auto" is resolved to a concrete agent type from the goal before
+            # the RUNNING transition so the resolved type is persisted.
+            task.agent_type = resolve_agent_type(task.agent_type, task.goal)
 
             task.status = TaskStatus.RUNNING
             task.attempt += 1
