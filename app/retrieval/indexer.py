@@ -3,9 +3,9 @@
 The :class:`RepositoryIndexer` turns a checkout into rows in ``code_chunks``:
 it discovers supported source files, extracts symbols, slices the file into
 chunks at symbol boundaries, and persists them scoped to a workspace. It is
-offline-first — no embeddings are computed — so indexing needs no paid API;
-semantic search can be layered on later by backfilling the ``embedding``
-column.
+offline-first — the default hashing embedder computes vectors without a paid
+API; semantic search layers on naturally once the ``embedding`` column is
+backfilled.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from app.database.models.code_chunk import CodeChunk
 from app.database.repositories.code_chunk import CodeChunkRepository
 from app.retrieval.chunking import chunk_source
 from app.retrieval.discovery import discover_source_files
+from app.retrieval.embedder import Embedder
 from app.retrieval.languages import detect_language
 from app.retrieval.symbols import Symbol, extract_symbols
 
@@ -38,10 +39,17 @@ class IndexSummary:
 
 
 class RepositoryIndexer:
-    """Builds and replaces a workspace's code index."""
+    """Builds and replaces a workspace's code index.
 
-    def __init__(self, session: AsyncSession) -> None:
+    Args:
+        session: Async database session for chunk storage.
+        embedder: Optional embedding source. When provided, each chunk's
+            content is embedded and persisted in the ``embedding`` column.
+    """
+
+    def __init__(self, session: AsyncSession, *, embedder: Embedder | None = None) -> None:
         self._session = session
+        self._embedder = embedder
 
     async def index(
         self,
@@ -84,6 +92,11 @@ class RepositoryIndexer:
                         meta={"symbols": _symbol_names(chunk.symbols)},
                     )
                 )
+
+        if self._embedder is not None and code_chunks:
+            vectors = await self._embedder.embed([chunk.content for chunk in code_chunks])
+            for stored, vector in zip(code_chunks, vectors, strict=True):
+                stored.embedding = vector
 
         repository = CodeChunkRepository(self._session)
         inserted = await repository.replace_workspace_index(workspace_uuid, code_chunks)

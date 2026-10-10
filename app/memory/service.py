@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from app.database.models.enums import MemoryKind
 from app.database.models.memory import MemoryEntry
 from app.database.repositories.memory import MemoryRepository
+from app.retrieval.embedder import Embedder
 from app.retrieval.retriever import extract_query_terms
 
 if TYPE_CHECKING:
@@ -34,15 +35,29 @@ class MemoryService:
 
     Args:
         repository: Persistence source for memory entries.
+        embedder: Optional embedding source. When provided, remembered entries
+            are embedded and recall blends semantic similarity with keyword
+            hits.
     """
 
-    def __init__(self, repository: MemoryRepository) -> None:
+    def __init__(self, repository: MemoryRepository, *, embedder: Embedder | None = None) -> None:
         self._repository = repository
+        self._embedder = embedder
 
     @classmethod
-    def from_session(cls, session: AsyncSession) -> MemoryService:
-        """Build a service bound to a database session."""
-        return cls(MemoryRepository(session))
+    def from_session(
+        cls,
+        session: AsyncSession,
+        *,
+        embedder: Embedder | None = None,
+    ) -> MemoryService:
+        """Build a service bound to a database session.
+
+        Args:
+            session: Async database session for memory storage.
+            embedder: Optional embedding source for semantic recall.
+        """
+        return cls(MemoryRepository(session), embedder=embedder)
 
     async def remember(
         self,
@@ -58,14 +73,16 @@ class MemoryService:
             raise ValueError("memory content must not be empty")
         if len(content) > 100_000:
             raise ValueError("memory content is too long")
-        return await self._repository.add(
-            MemoryEntry(
-                workspace_id=workspace_id,
-                kind=kind,
-                content=content,
-                source=(source or "cli")[:_SOURCE_STR_LIMIT],
-            )
+        entry = MemoryEntry(
+            workspace_id=workspace_id,
+            kind=kind,
+            content=content,
+            source=(source or "cli")[:_SOURCE_STR_LIMIT],
         )
+        if self._embedder is not None:
+            vectors = await self._embedder.embed([entry.content])
+            entry.embedding = vectors[0]
+        return await self._repository.add(entry)
 
     async def list(
         self,
@@ -102,7 +119,9 @@ class MemoryService:
 
         Query terms are matched as literal substrings over ``content`` — one
         search per term, deduplicated and ranked by a compactness score so the
-        tightest, most specific matches surface first.
+        tightest, most specific matches surface first. When an embedder is
+        configured, the highest-similarity entries (semantic search) are
+        merged ahead of the keyword hits.
         """
         terms = [term for term in extract_query_terms(query) if len(term) >= 3]
         if not terms:
@@ -118,7 +137,14 @@ class MemoryService:
             ),
             reverse=True,
         )
-        return tuple(ranked[:limit])
+        if self._embedder is None:
+            return tuple(ranked[:limit])
+        vectors = await self._embedder.embed([query])
+        semantic = await self._repository.semantic_search(workspace_id, vectors[0], limit=limit)
+        merged: dict[uuid.UUID, MemoryEntry] = {entry.id: entry for entry in semantic}
+        for entry in ranked:
+            merged.setdefault(entry.id, entry)
+        return tuple(merged.values())[:limit]
 
 
 def format_memory_block(entries: Sequence[MemoryEntry]) -> str:

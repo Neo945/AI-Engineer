@@ -31,6 +31,7 @@ from app.monitoring import instruments as inst
 from app.orchestrator.broker import EventBroker
 from app.orchestrator.cancellation import CancellationRegistry, TaskCancelled
 from app.retrieval.context import ContextAssembler, format_context
+from app.retrieval.embedder import build_embedder
 
 EventKind = Literal[
     "started",
@@ -397,26 +398,32 @@ class Orchestrator:
         disabled or produce nothing, so the agent loop runs exactly as before.
         """
         messages: list[ChatMessage] = []
-        if self._settings.memory_enabled:
-            memory = await MemoryService.from_session(session).recall(
-                task.session.workspace.id,
-                task.goal,
-                limit=self._settings.memory_max_entries,
-            )
-            block = format_memory_block(memory)
-            if block:
-                messages.append(ChatMessage(role=ChatRole.USER, content=block))
-        if not self._settings.retrieval_enabled:
+        embedder = build_embedder(self._settings) if self._settings.embedding_enabled else None
+        try:
+            if self._settings.memory_enabled:
+                memory = await MemoryService.from_session(session, embedder=embedder).recall(
+                    task.session.workspace.id,
+                    task.goal,
+                    limit=self._settings.memory_max_entries,
+                )
+                block = format_memory_block(memory)
+                if block:
+                    messages.append(ChatMessage(role=ChatRole.USER, content=block))
+            if not self._settings.retrieval_enabled:
+                return tuple(messages)
+            window = await ContextAssembler.from_session(
+                session,
+                max_chunks=self._settings.retrieval_max_chunks,
+                max_chars=self._settings.retrieval_max_chars,
+                embedder=embedder,
+            ).assemble(task.session.workspace.id, task.goal)
+            text = format_context(window)
+            if text:
+                messages.append(ChatMessage(role=ChatRole.USER, content=text))
             return tuple(messages)
-        window = await ContextAssembler.from_session(
-            session,
-            max_chunks=self._settings.retrieval_max_chunks,
-            max_chars=self._settings.retrieval_max_chars,
-        ).assemble(task.session.workspace.id, task.goal)
-        text = format_context(window)
-        if text:
-            messages.append(ChatMessage(role=ChatRole.USER, content=text))
-        return tuple(messages)
+        finally:
+            if embedder is not None:
+                await embedder.close()
 
     async def _assemble_initial_messages(
         self,

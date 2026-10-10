@@ -87,8 +87,16 @@ from app.git.pr import PRDescription, generate_pr_description, render_pr
 from app.llm.factory import build_llm_client
 from app.llm.messages import ChatMessage, ChatRole
 from app.llm.protocol import LLMProvider
+from app.mcp import MCPConfigError, MCPManager
 from app.memory.service import MemoryService
+from app.modernization import (
+    MODERNIZATION_PROMPT,
+    build_modernization_seed,
+    parse_modernization_report,
+    render_modernization,
+)
 from app.orchestrator.orchestrator import Orchestrator, OrchestratorEvent
+from app.retrieval.embedder import build_embedder
 from app.retrieval.indexer import RepositoryIndexer
 from app.review import ReviewFinding, extract_verdict, parse_report, sort_findings
 from app.tools.schemas import ToolCall, ToolName
@@ -306,10 +314,15 @@ async def cmd_index(
     the same transaction, so running ``engineer index`` repeatedly converges.
     """
     async with ctx.db_session() as session:
-        summary = await RepositoryIndexer(session).index(
-            workspace_id=state.workspace_id,
-            repo_path=repo,
-        )
+        embedder = build_embedder(ctx.settings) if ctx.settings.embedding_enabled else None
+        try:
+            summary = await RepositoryIndexer(session, embedder=embedder).index(
+                workspace_id=state.workspace_id,
+                repo_path=repo,
+            )
+        finally:
+            if embedder is not None:
+                await embedder.close()
     lines = [
         ("Repository", repo.name),
         ("Files indexed", str(summary.files_indexed)),
@@ -1060,6 +1073,84 @@ async def cmd_design(
             await llm.close()
 
 
+async def cmd_modernize(
+    ctx: CliContext,
+    *,
+    repo: Path,
+    state: WorkspaceState | None,
+    target: str | None = None,
+    llm: LLMProvider | None = None,
+) -> int:
+    """Plan a legacy modernization of the workspace.
+
+    The deterministic dependency-graph summary is handed to the LLM as a staff
+    engineer; its reply is parsed into a structured
+    :class:`ModernizationReport` (current/target state, staged migration plan,
+    risk assessment, rollback strategy, validation) and rendered as Markdown.
+    Plan-only: no changes are written and no sandbox is used, so the plan can be
+    reviewed and approved before any work begins.
+    """
+    graph = build_file_graph(repo)
+    seed = build_modernization_seed(graph_summary(graph), target=target)
+    llm_owned = llm is None
+    if llm is None:
+        llm = _build_llm(ctx)
+    try:
+        try:
+            response = await llm.complete(
+                [ChatMessage(role=ChatRole.USER, content=seed)],
+                tools=[],
+                system=MODERNIZATION_PROMPT,
+                max_tokens=ctx.settings.llm_max_tokens,
+                temperature=ctx.settings.llm_temperature,
+            )
+        except Exception as exc:
+            raise CliError(_llm_failure_hint(exc)) from exc
+        report = parse_modernization_report(response.content)
+        ctx.console.print(render_modernization(report))
+        return 0
+    finally:
+        if llm_owned:
+            await llm.close()
+
+
+async def cmd_mcp_list(
+    ctx: CliContext,
+    *,
+    manager: MCPManager | None = None,
+) -> int:
+    """List configured MCP servers and the tools they publish.
+
+    MCP is optional: when disabled a short notice is printed and the command
+    succeeds. A misconfigured server file is reported as a CLI error.
+    """
+    owned = manager is None
+    if manager is None:
+        try:
+            manager = MCPManager.from_settings(ctx.settings)
+        except MCPConfigError as exc:
+            raise CliError(str(exc)) from exc
+    if manager is None:
+        ctx.console.print("[yellow]MCP is disabled[/] — set MCP_ENABLED=true and MCP_SERVERS_FILE.")
+        return 0
+    try:
+        tools = await manager.list_tools()
+    finally:
+        if owned:
+            await manager.aclose()
+    if not tools:
+        ctx.console.print("No MCP tools discovered.")
+        return 0
+    table = Table(title="MCP tools")
+    table.add_column("server", style="cyan")
+    table.add_column("tool", style="bold")
+    table.add_column("description")
+    for tool in tools:
+        table.add_row(tool.server, tool.name, tool.description)
+    ctx.console.print(table)
+    return 0
+
+
 async def cmd_analyze(
     ctx: CliContext,
     *,
@@ -1260,13 +1351,18 @@ async def cmd_memory_add(
     from app.database.models.enums import MemoryKind
 
     async with ctx.db_session() as session:
-        await MemoryService.from_session(session).remember(
-            state.workspace_id,
-            content=content,
-            kind=MemoryKind(kind),
-            source="cli",
-        )
-        await session.commit()
+        embedder = build_embedder(ctx.settings) if ctx.settings.embedding_enabled else None
+        try:
+            await MemoryService.from_session(session, embedder=embedder).remember(
+                state.workspace_id,
+                content=content,
+                kind=MemoryKind(kind),
+                source="cli",
+            )
+            await session.commit()
+        finally:
+            if embedder is not None:
+                await embedder.close()
     ctx.console.print(f"[green]remembered[/] [bold]{_short(content)}[/] as {kind}")
     return 0
 

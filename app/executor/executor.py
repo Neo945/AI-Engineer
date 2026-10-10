@@ -25,6 +25,7 @@ from app.executor.paths import PathTraversalError, resolve_within
 from app.executor.policy import CommandPolicy, CommandTier, policy_message
 from app.executor.sandbox import SandboxLimits, SandboxManager, SandboxOutput
 from app.executor.test_parser import format_report, parse_test_output
+from app.mcp.manager import MCPManager
 from app.monitoring import instruments as inst
 from app.tools.registry import Handler, ToolRegistry
 from app.tools.schemas import ToolCall, ToolName, ToolResult
@@ -46,6 +47,7 @@ from app.tools.specs.git import (
     GitLogArgs,
     GitPushArgs,
 )
+from app.tools.specs.mcp import MCPCallArgs
 from app.tools.specs.terminal import TerminalRunArgs
 from app.tools.specs.tests import TestRunArgs
 
@@ -88,6 +90,7 @@ class ToolExecutor:
         default_timeout_ms: int = 30_000,
         policy: CommandPolicy | None = None,
         git_protect_dirty_tree: bool = True,
+        mcp: MCPManager | None = None,
     ) -> None:
         self._workspace_dir = Path(os.path.realpath(workspace_dir))
         self._registry = registry
@@ -96,6 +99,7 @@ class ToolExecutor:
         self._default_timeout_ms = default_timeout_ms
         self._policy = policy or CommandPolicy()
         self._git_protect_dirty_tree = git_protect_dirty_tree
+        self._mcp = mcp
         self._baseline_dirty: frozenset[str] | None = None
         self._register()
 
@@ -131,6 +135,7 @@ class ToolExecutor:
             default_timeout_ms=settings.sandbox_default_timeout_ms,
             policy=CommandPolicy.from_settings(settings),
             git_protect_dirty_tree=settings.git_protect_dirty_tree,
+            mcp=MCPManager.from_settings(settings),
         )
 
     @property
@@ -147,6 +152,11 @@ class ToolExecutor:
     def sandboxes(self) -> SandboxManager:
         """The sandbox manager handling terminal execution for this workspace."""
         return self._sandboxes
+
+    @property
+    def mcp(self) -> MCPManager | None:
+        """The MCP manager bridging external servers, when configured."""
+        return self._mcp
 
     async def execute(self, call: ToolCall) -> ToolResult:
         """Validate and dispatch a tool call, always returning a result."""
@@ -175,6 +185,7 @@ class ToolExecutor:
             ToolName.GIT_BRANCH: self._git_branch,
             ToolName.GIT_CHECKOUT: self._git_checkout,
             ToolName.GIT_PUSH: self._git_push,
+            ToolName.MCP_CALL: self._mcp_call,
         }
         for spec in ALL_SPECS:
             self._registry.register(
@@ -619,6 +630,22 @@ class ToolExecutor:
     @staticmethod
     def _ok(call: ToolCall, output: str) -> ToolResult:
         return ToolResult(call_id=call.id, tool=call.tool, ok=True, output=output)
+
+    async def _mcp_call(self, call: ToolCall, args: BaseModel) -> ToolResult:
+        arguments = cast(MCPCallArgs, args)
+        if self._mcp is None:
+            return self._fail(
+                call,
+                "MCP is not configured: set MCP_ENABLED=true and MCP_SERVERS_FILE",
+            )
+        result = await self._mcp.call(arguments.server, arguments.tool, dict(arguments.arguments))
+        return ToolResult(
+            call_id=call.id,
+            tool=call.tool,
+            ok=result.ok,
+            output=result.output,
+            error=result.error,
+        )
 
     @staticmethod
     def _fail(call: ToolCall, error: str) -> ToolResult:

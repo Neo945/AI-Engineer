@@ -112,6 +112,7 @@ def test_every_declared_tool_has_a_spec() -> None:
         ToolName.GIT_BRANCH,
         ToolName.GIT_CHECKOUT,
         ToolName.GIT_PUSH,
+        ToolName.MCP_CALL,
     }
     assert declared == {spec.name for spec in ALL_SPECS}
 

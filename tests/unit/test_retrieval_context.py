@@ -9,6 +9,7 @@ import pytest
 
 from app.database.models.code_chunk import CodeChunk
 from app.retrieval.context import ContextAssembler, ContextItem, ContextWindow, format_context
+from app.retrieval.embedder import HashingEmbedder
 from app.retrieval.retriever import (
     Retriever,
     extract_qualified_names,
@@ -81,6 +82,15 @@ class _FakeRepository:
     ) -> Sequence[CodeChunk]:
         return [chunk for chunk in self._chunks if query.lower() in chunk.content.lower()][:limit]
 
+    async def embedding_search(
+        self,
+        workspace_id: object,
+        embedding: list[float],
+        *,
+        limit: int = 20,
+    ) -> Sequence[CodeChunk]:
+        return [chunk for chunk in self._chunks if chunk.embedding is not None][:limit]
+
 
 @pytest.mark.asyncio
 async def test_retriever_ranks_symbol_matches_first() -> None:
@@ -108,6 +118,24 @@ async def test_retriever_dedupes_across_symbol_and_keyword() -> None:
 
     assert len(hits) == 1
     assert hits[0].score == 10.0
+
+
+@pytest.mark.asyncio
+async def test_retriever_blends_semantic_hits() -> None:
+    embedder = HashingEmbedder(dimension=256)
+    auth = _chunk(content="def validate_token(token):\n    return token.is_valid\n")
+    unrelated = _chunk(content="def run_migration():\n    apply_schema()\n")
+    vectors = await embedder.embed([auth.content, unrelated.content])
+    auth.embedding = vectors[0]
+    unrelated.embedding = vectors[1]
+    repository = _FakeRepository([unrelated, auth])
+
+    hits = await Retriever(repository, embedder=embedder).ranked_search(
+        uuid.uuid4(), "validate_token token validation"
+    )
+
+    assert hits[0].chunk.id == auth.id
+    assert any("semantic" in hit.matches for hit in hits)
 
 
 @pytest.mark.asyncio

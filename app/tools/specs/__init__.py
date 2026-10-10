@@ -14,6 +14,8 @@ from app.tools.specs.filesystem import MODELS as _FILESYSTEM_MODELS
 from app.tools.specs.filesystem import SPECS as _FILESYSTEM_SPECS
 from app.tools.specs.git import MODELS as _GIT_MODELS
 from app.tools.specs.git import SPECS as _GIT_SPECS
+from app.tools.specs.mcp import MODELS as _MCP_MODELS
+from app.tools.specs.mcp import SPECS as _MCP_SPECS
 from app.tools.specs.terminal import MODELS as _TERMINAL_MODELS
 from app.tools.specs.terminal import SPECS as _TERMINAL_SPECS
 from app.tools.specs.tests import MODELS as _TESTS_MODELS
@@ -24,6 +26,7 @@ ALL_SPECS: list[ToolSpec] = [
     *_TERMINAL_SPECS,
     *_GIT_SPECS,
     *_TESTS_SPECS,
+    *_MCP_SPECS,
 ]
 
 ARGUMENT_MODELS: dict[ToolName, type[BaseModel]] = {
@@ -31,4 +34,5 @@ ARGUMENT_MODELS: dict[ToolName, type[BaseModel]] = {
     **_TERMINAL_MODELS,
     **_GIT_MODELS,
     **_TESTS_MODELS,
+    **_MCP_MODELS,
 }

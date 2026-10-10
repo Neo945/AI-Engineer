@@ -42,6 +42,9 @@ examples:
   engineer graph app/core/config.py focus on one file's dependencies
   engineer arch                     LLM architecture analysis seeded by the graph
   engineer design "url shortener"   generate a system-design document with diagrams
+  engineer modernize                plan a legacy-modernization migration with risks
+  engineer modernize --target "Python 3.13, FastAPI"
+  engineer mcp list                 list configured MCP servers and their tools
   engineer memory add "pins are async" --kind decision
   engineer memory list --limit 20
   engineer memory recall "why sqlite?"
@@ -210,6 +213,24 @@ def build_parser() -> ArgumentParser:
         help="run the deterministic concern scan without the LLM",
     )
     analyze.set_defaults(handler=_cmd_analyze)
+
+    modernize = subparsers.add_parser(
+        "modernize",
+        help="plan a legacy-modernization migration with risks and rollback",
+    )
+    modernize.add_argument(
+        "--target",
+        default=None,
+        help="optional target stack to modernize toward",
+    )
+    modernize.set_defaults(handler=_cmd_modernize)
+
+    mcp = subparsers.add_parser("mcp", help="inspect configured MCP servers and their tools")
+    mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True, metavar="subcommand")
+    mcp_list = mcp_sub.add_parser(
+        "list", help="list configured MCP servers and the tools they expose"
+    )
+    mcp_list.set_defaults(handler=_cmd_mcp_list)
 
     test = subparsers.add_parser("test", help="run the project's test suite")
     test.add_argument(
@@ -485,6 +506,23 @@ async def _cmd_analyze(
     )
 
 
+async def _cmd_modernize(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    return await commands.cmd_modernize(
+        ctx,
+        repo=repo,
+        state=state,
+        target=args.target,
+    )
+
+
+async def _cmd_mcp_list(
+    ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
+) -> int:
+    return await commands.cmd_mcp_list(ctx)
+
+
 async def _cmd_test(
     ctx: CliContext, args: Namespace, repo: Path, state: WorkspaceState | None
 ) -> int:
@@ -589,7 +627,7 @@ async def arun(argv: Sequence[str] | None, ctx: CliContext) -> int:
     args = build_parser().parse_args(argv)
     init_telemetry(ctx.settings)
     try:
-        if args.command in ("eval", "design"):
+        if args.command in ("eval", "design", "mcp"):
             repo = Path.cwd()
             state = None
         else:

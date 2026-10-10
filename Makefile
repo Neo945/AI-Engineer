@@ -3,7 +3,7 @@ VENV ?= .venv
 PIP := $(VENV)/bin/pip
 PY := $(VENV)/bin/python
 
-.PHONY: help venv install dev-install up down logs psql migrate lint format typecheck test test-unit run executor-image clean
+.PHONY: help venv install dev-install up down logs psql migrate lint format typecheck test test-unit run executor-image deploy deploy-delete clean
 
 help: ## List available targets
 	@echo "Targets:"
@@ -61,6 +61,12 @@ run: ## Run the API with hot reload
 
 executor-image: ## Build the sandbox executor image used by terminal tools
 	docker build -t coding-agent-executor:latest -f infra/executor/Dockerfile infra/executor
+
+deploy: ## Apply the Kubernetes manifests (needs kubectl + kustomize)
+	kubectl apply -k deploy/k8s
+
+deploy-delete: ## Remove the Kubernetes manifests
+	kubectl delete -k deploy/k8s
 
 clean: ## Remove venv and caches
 	rm -rf $(VENV) .pytest_cache .mypy_cache .ruff_cache .coverage htmlcov

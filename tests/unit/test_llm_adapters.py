@@ -12,6 +12,7 @@ from typing import Any, cast
 
 from anthropic.lib.streaming._types import TextEvent
 from anthropic.types import Message, TextBlock, ToolUseBlock, Usage
+from google.genai import types as genai_types
 from openai.types import CompletionUsage
 from openai.types.chat import (
     ChatCompletion,
@@ -34,6 +35,14 @@ from app.llm.clients.anthropic import (
 )
 from app.llm.clients.anthropic import (
     _parse_response as _parse_anthropic_response,
+)
+from app.llm.clients.gemini import (
+    GeminiClient,
+    _to_gemini_contents,
+    _to_gemini_tools,
+)
+from app.llm.clients.gemini import (
+    _parse_response as _parse_gemini_response,
 )
 from app.llm.clients.openai import (
     OpenAIClient,
@@ -514,3 +523,223 @@ async def test_openai_stream_accumulates_tool_calls() -> None:
     assert usage.usage.input_tokens == 5
     assert usage.usage.output_tokens == 3
     assert usage.model == "gpt-4o-mini"
+
+
+# --- Gemini mapping ---
+
+
+def _gemini_response() -> genai_types.GenerateContentResponse:
+    return genai_types.GenerateContentResponse(
+        candidates=[
+            genai_types.Candidate(
+                content=genai_types.Content(
+                    role="model",
+                    parts=[
+                        genai_types.Part(text="Let me check."),
+                        genai_types.Part(
+                            function_call=genai_types.FunctionCall(
+                                id="call_1", name="file_read", args={"path": "x.py"}
+                            )
+                        ),
+                    ],
+                ),
+                finish_reason=genai_types.FinishReason.STOP,
+            )
+        ],
+        usage_metadata=genai_types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=12, candidates_token_count=4
+        ),
+        model_version="gemini-2.0-flash",
+    )
+
+
+def test_gemini_message_mapping_skips_system_and_translates_roles() -> None:
+    out = _to_gemini_contents(_messages())
+    assert [content.role for content in out] == ["user", "model", "user"]
+    assert out[0].parts[0].text == "Read x.py"
+    call = out[1].parts[0].function_call
+    assert call is not None
+    assert call.id == "call_1"
+    assert call.name == "file_read"
+    assert call.args == {"path": "x.py"}
+    result = out[2].parts[0].function_response
+    assert result is not None
+    assert result.name == "file_read"
+    assert result.id == "call_1"
+    assert result.response == {"result": "ok"}
+
+
+def test_gemini_tools_mapping() -> None:
+    tools = _to_gemini_tools(_tools())
+    assert len(tools) == 1
+    declarations = tools[0].function_declarations
+    assert declarations is not None
+    assert declarations[0].name == "file_read"
+    assert declarations[0].description == "Read a file"
+    assert declarations[0].parameters_json_schema == {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+    }
+
+
+def test_gemini_tools_mapping_empty() -> None:
+    assert _to_gemini_tools([]) == []
+
+
+def test_gemini_response_parsing() -> None:
+    parsed = _parse_gemini_response(_gemini_response(), requested_model="fallback")
+    assert parsed.content == "Let me check."
+    assert parsed.stop_reason == "tool_use"
+    assert parsed.model == "gemini-2.0-flash"
+    assert parsed.usage.input_tokens == 12
+    assert parsed.usage.output_tokens == 4
+    assert len(parsed.tool_requests) == 1
+    request = parsed.tool_requests[0]
+    assert request.id == "call_1"
+    assert request.name == "file_read"
+    assert request.arguments == {"path": "x.py"}
+
+
+def test_gemini_response_parsing_synthesizes_missing_call_id() -> None:
+    response = genai_types.GenerateContentResponse(
+        candidates=[
+            genai_types.Candidate(
+                content=genai_types.Content(
+                    role="model",
+                    parts=[
+                        genai_types.Part(
+                            function_call=genai_types.FunctionCall(name="file_read", args={})
+                        )
+                    ],
+                ),
+                finish_reason=genai_types.FinishReason.STOP,
+            )
+        ]
+    )
+    parsed = _parse_gemini_response(response, requested_model="fallback")
+    assert parsed.tool_requests[0].id == "call_0"
+    assert parsed.model == "fallback"
+
+
+async def test_gemini_complete_delegates_and_parses() -> None:
+    class _FakeModels:
+        def __init__(self, response: genai_types.GenerateContentResponse) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self._response = response
+
+        async def generate_content(self, **kwargs: Any) -> genai_types.GenerateContentResponse:
+            self.calls.append(kwargs)
+            return self._response
+
+    class _FakeClient:
+        def __init__(self, response: genai_types.GenerateContentResponse) -> None:
+            self.aio = type("_FakeAio", (), {"models": _FakeModels(response)})()
+
+    client = GeminiClient(model="gemini-2.0-flash", api_key="secret")
+    fake = cast(Any, _FakeClient(_gemini_response()))
+    client._client = fake
+    parsed = await client.complete(
+        _messages(),
+        tools=_tools(),
+        system="You are a coding agent.",
+        max_tokens=100,
+        temperature=0.0,
+    )
+    first = fake.aio.models.calls[0]
+    assert first["model"] == "gemini-2.0-flash"
+    assert first["config"].max_output_tokens == 100
+    assert first["config"].system_instruction == "You are a coding agent."
+    assert parsed.tool_requests[0].name == "file_read"
+
+    await client.complete(_messages(), tools=[], system=None, max_tokens=10, temperature=0.0)
+    assert fake.aio.models.calls[1]["config"].system_instruction is None
+    assert not fake.aio.models.calls[1]["config"].tools
+
+
+async def test_gemini_stream_emits_text_tool_and_usage() -> None:
+    chunks = [
+        genai_types.GenerateContentResponse(
+            candidates=[
+                genai_types.Candidate(
+                    content=genai_types.Content(role="model", parts=[genai_types.Part(text="Hel")])
+                )
+            ],
+            model_version="gemini-2.0-flash",
+        ),
+        genai_types.GenerateContentResponse(
+            candidates=[
+                genai_types.Candidate(
+                    content=genai_types.Content(role="model", parts=[genai_types.Part(text="lo")])
+                )
+            ],
+        ),
+        genai_types.GenerateContentResponse(
+            candidates=[
+                genai_types.Candidate(
+                    content=genai_types.Content(
+                        role="model",
+                        parts=[
+                            genai_types.Part(
+                                function_call=genai_types.FunctionCall(
+                                    id="call_1", name="file_read", args={"path": "x.py"}
+                                )
+                            )
+                        ],
+                    )
+                )
+            ],
+            usage_metadata=genai_types.GenerateContentResponseUsageMetadata(
+                prompt_token_count=5, candidates_token_count=3
+            ),
+        ),
+    ]
+
+    class _FakeStream:
+        def __init__(self, chunks: list[genai_types.GenerateContentResponse]) -> None:
+            self._chunks = chunks
+
+        def __aiter__(self) -> _FakeStream:
+            self._index = 0
+            return self
+
+        async def __anext__(self) -> genai_types.GenerateContentResponse:
+            if self._index >= len(self._chunks):
+                raise StopAsyncIteration
+            chunk = self._chunks[self._index]
+            self._index += 1
+            return chunk
+
+    class _FakeModels:
+        def __init__(self, chunks: list[genai_types.GenerateContentResponse]) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self._chunks = chunks
+
+        async def generate_content_stream(self, **kwargs: Any) -> _FakeStream:
+            self.calls.append(kwargs)
+            return _FakeStream(self._chunks)
+
+    class _FakeClient:
+        def __init__(self, chunks: list[genai_types.GenerateContentResponse]) -> None:
+            self.aio = type("_FakeAio", (), {"models": _FakeModels(chunks)})()
+
+    client = GeminiClient(model="gemini-2.0-flash", api_key="secret")
+    fake = cast(Any, _FakeClient(chunks))
+    client._client = fake
+    events: list[LLMStreamEvent] = [
+        event
+        async for event in client.stream(
+            _messages(), tools=_tools(), system="s", max_tokens=50, temperature=0.0
+        )
+    ]
+    assert [event.type for event in events] == ["text", "text", "tool_request", "usage"]
+    assert "".join(event.text for event in events if event.type == "text") == "Hello"
+    request = next(event.tool_request for event in events if event.type == "tool_request")
+    assert request is not None
+    assert request.id == "call_1"
+    assert request.name == "file_read"
+    assert request.arguments == {"path": "x.py"}
+    usage = next(event for event in events if event.type == "usage")
+    assert usage.usage is not None
+    assert usage.usage.input_tokens == 5
+    assert usage.usage.output_tokens == 3
+    assert usage.model == "gemini-2.0-flash"

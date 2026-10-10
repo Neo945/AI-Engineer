@@ -37,6 +37,7 @@ class ToolName(StrEnum):
     GIT_BRANCH = "git_branch"
     GIT_CHECKOUT = "git_checkout"
     GIT_PUSH = "git_push"
+    MCP_CALL = "mcp_call"
 
 
 class ToolCall(BaseModel):

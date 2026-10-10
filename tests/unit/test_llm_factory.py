@@ -6,6 +6,7 @@ import pytest
 
 from app.core.config import Settings
 from app.llm.clients.anthropic import AnthropicClient
+from app.llm.clients.gemini import GeminiClient
 from app.llm.clients.openai import OpenAIClient
 from app.llm.factory import build_llm_client
 
@@ -34,6 +35,14 @@ def test_factory_builds_anthropic_client() -> None:
     client = build_llm_client(settings)
     assert isinstance(client, AnthropicClient)
     assert client.model == "claude-x"
+
+
+def test_factory_builds_gemini_client() -> None:
+    settings = Settings(_env_file=None, llm_provider="gemini", llm_model="gemini-2.0-flash")
+    client = build_llm_client(settings)
+    assert isinstance(client, GeminiClient)
+    assert client.model == "gemini-2.0-flash"
+    assert client.base_url is None
 
 
 def test_factory_is_case_and_whitespace_insensitive() -> None:

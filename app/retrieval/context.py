@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from app.database.repositories.code_chunk import CodeChunkRepository
+from app.retrieval.embedder import Embedder
 from app.retrieval.retriever import Retriever, extract_query_terms
 
 if TYPE_CHECKING:
@@ -85,10 +86,19 @@ class ContextAssembler:
         *,
         max_chunks: int = DEFAULT_MAX_CHUNKS,
         max_chars: int = DEFAULT_MAX_CHARS,
+        embedder: Embedder | None = None,
     ) -> ContextAssembler:
-        """Build an assembler bound to a database session."""
+        """Build an assembler bound to a database session.
+
+        Args:
+            session: Async database session for chunk storage.
+            max_chunks: Upper bound on items in a window.
+            max_chars: Upper bound on total content characters.
+            embedder: Optional embedding source passed to the retriever for
+                semantic blending.
+        """
         return cls(
-            Retriever(CodeChunkRepository(session)),
+            Retriever(CodeChunkRepository(session), embedder=embedder),
             max_chunks=max_chunks,
             max_chars=max_chars,
         )

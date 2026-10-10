@@ -103,6 +103,25 @@ class CodeChunkRepository(BaseRepository[CodeChunk, uuid.UUID]):
         )
         return (await self._session.scalars(stmt)).all()
 
+    async def embedding_search(
+        self,
+        workspace_id: uuid.UUID,
+        embedding: list[float],
+        *,
+        limit: int = 20,
+    ) -> Sequence[CodeChunk]:
+        """Return chunks most similar to ``embedding`` by cosine distance."""
+        stmt = (
+            select(CodeChunk)
+            .where(
+                CodeChunk.workspace_id == workspace_id,
+                CodeChunk.embedding.is_not(None),
+            )
+            .order_by(CodeChunk.embedding.cosine_distance(embedding))
+            .limit(limit)
+        )
+        return (await self._session.scalars(stmt)).all()
+
     async def list_files(self, workspace_id: uuid.UUID, *, limit: int = 1000) -> Sequence[str]:
         """Return the distinct indexed file paths for a workspace."""
         stmt = (

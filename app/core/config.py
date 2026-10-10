@@ -30,6 +30,16 @@ class Settings(BaseSettings):
         redis_url: URL for Redis (cache, rate limits, pub/sub).
         embedding_dimension: Fixed pgvector dimension. Changing this after
             vectors are inserted requires a data migration.
+        embedding_enabled: Compute embeddings for indexed chunks and memory
+            entries (backfills the pgvector columns the semantic layers use).
+        embedding_provider: Embedding backend (``hash`` or ``openai``). The
+            ``hash`` provider is offline and deterministic; ``openai`` uses
+            any OpenAI-compatible ``/embeddings`` endpoint.
+        embedding_model: Model used when ``embedding_provider`` is ``openai``.
+        embedding_api_key: API key for the embedding provider; falls back to
+            ``llm_api_key`` when unset.
+        embedding_base_url: Optional base URL for embeddings; falls back to
+            ``llm_base_url`` when unset.
         executor_image: Docker image used for sandbox containers.
         sandbox_memory_mb: Memory cap per sandbox container.
         sandbox_cpu_nanos: CPU quota per sandbox container (1e9 = one vCPU).
@@ -37,7 +47,8 @@ class Settings(BaseSettings):
             network. Keep off in production.
         sandbox_default_timeout_ms: Hard wall-clock timeout for sandboxed
             commands when a call does not override it.
-        llm_provider: LLM backend to use (``anthropic`` or ``openai``).
+        llm_provider: LLM backend to use (``anthropic``, ``openai``, or
+            ``gemini``).
         llm_model: Model identifier sent with every LLM request.
         llm_api_key: API key for the LLM provider. ``None`` falls back to the
             provider SDK's environment-variable handling.
@@ -72,6 +83,11 @@ class Settings(BaseSettings):
             when the benchmark task does not specify its own timeout.
         eval_keep_workspaces: Keep eval scratch workspaces on disk after a
             run instead of deleting them.
+        mcp_enabled: Expose the MCP bridge tool so the agent can call tools
+            published by external Model Context Protocol servers.
+        mcp_servers_file: Path to a JSON file declaring MCP servers (command,
+            args, env). Required when ``mcp_enabled`` is true.
+        mcp_timeout_seconds: Per-request timeout for MCP server calls.
         command_policy_enabled: Classify sandboxed terminal commands against
             deny/confirm rules (destructive commands are blocked or require
             ``confirm=True``).
@@ -117,6 +133,11 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     embedding_dimension: int = Field(default=1536, ge=1)
+    embedding_enabled: bool = True
+    embedding_provider: str = "hash"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_api_key: str | None = None
+    embedding_base_url: str | None = None
 
     executor_image: str = "coding-agent-executor:latest"
     sandbox_memory_mb: int = Field(default=512, ge=128)
@@ -154,6 +175,10 @@ class Settings(BaseSettings):
     eval_results_path: str = ".engineer/eval-results.jsonl"
     eval_default_timeout_seconds: int = Field(default=300, ge=30)
     eval_keep_workspaces: bool = False
+
+    mcp_enabled: bool = False
+    mcp_servers_file: str | None = None
+    mcp_timeout_seconds: float = Field(default=30.0, ge=1.0)
 
     command_policy_enabled: bool = True
     command_deny_extra: list[str] = Field(default_factory=list)

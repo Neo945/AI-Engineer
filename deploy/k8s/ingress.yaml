@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: coding-agent-api
+  labels:
+    app.kubernetes.io/name: coding-agent
+    app.kubernetes.io/component: api
+  annotations:
+    # Adjust for your ingress controller; these target ingress-nginx.
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: coding-agent.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: coding-agent-api
+                port:
+                  name: http

@@ -5,7 +5,9 @@ terms — function/class names and qualified ``Module.symbol`` references get
 exact symbol lookups, everything else becomes a substring scan — and merges
 the hits into a single scored, de-duplicated ranking. It is deliberately
 dependency-free: no embeddings, no external search service, so it works as
-soon as ``engineer index`` has run.
+soon as ``engineer index`` has run. When an :class:`Embedder` is supplied the
+goal is also embedded and the highest-similarity chunks join the ranking,
+giving semantic search on top of the keyword/symbol scan.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
+
+from app.retrieval.embedder import Embedder, cosine_similarity
 
 if TYPE_CHECKING:
     from app.database.models.code_chunk import CodeChunk
@@ -148,16 +152,32 @@ class ChunkSearch(Protocol):
         limit: int = 20,
     ) -> Sequence[CodeChunk]: ...
 
+    async def embedding_search(
+        self,
+        workspace_id: uuid.UUID,
+        embedding: list[float],
+        *,
+        limit: int = 20,
+    ) -> Sequence[CodeChunk]: ...
+
 
 class Retriever:
-    """Merge symbol and keyword hits into a scored, de-duplicated ranking.
+    """Merge symbol, keyword, and semantic hits into a scored ranking.
 
     Args:
         repository: Search source over the workspace's ``code_chunks``.
+        embedder: Optional embedding source. When provided, the goal is
+            embedded and the most similar chunks are folded into the ranking.
     """
 
-    def __init__(self, repository: ChunkSearch) -> None:
+    def __init__(
+        self,
+        repository: ChunkSearch,
+        *,
+        embedder: Embedder | None = None,
+    ) -> None:
         self._repository = repository
+        self._embedder = embedder
 
     async def ranked_search(
         self,
@@ -200,5 +220,14 @@ class Retriever:
                 score = _keyword_score(chunk.content, term, lower_content=lower_contents[chunk.id])
                 if score > 0:
                     await _record(chunk, score, term)
+
+        if self._embedder is not None:
+            vectors = await self._embedder.embed([goal])
+            query = vectors[0]
+            for chunk in await self._repository.embedding_search(workspace_id, query, limit=limit):
+                if chunk.embedding is None:
+                    continue
+                similarity = max(0.0, cosine_similarity(query, chunk.embedding))
+                await _record(chunk, similarity * _SYMBOL_MATCH_SCORE, "semantic")
 
         return sorted(ranked.values(), key=lambda hit: hit.score, reverse=True)[:limit]

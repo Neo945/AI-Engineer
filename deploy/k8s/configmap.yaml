@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coding-agent-config
+  labels:
+    app.kubernetes.io/name: coding-agent
+data:
+  # --- Core ---
+  APP_ENV: "production"
+  DEBUG: "false"
+  LOG_LEVEL: "INFO"
+  JSON_LOGS: "true"
+  API_PREFIX: "/api/v1"
+  # --- Redis (DATABASE_URL lives in the Secret; it embeds a password) ---
+  REDIS_URL: "redis://coding-agent-redis:6379/0"
+  # --- Embeddings (offline, deterministic default) ---
+  EMBEDDING_DIMENSION: "1536"
+  EMBEDDING_ENABLED: "true"
+  EMBEDDING_PROVIDER: "hash"
+  # --- Retrieval / memory ---
+  RETRIEVAL_ENABLED: "true"
+  MEMORY_ENABLED: "true"
+  # --- Sandbox / command policy ---
+  EXECUTOR_IMAGE: "coding-agent-executor:latest"
+  SANDBOX_NETWORK_ENABLED: "false"
+  COMMAND_POLICY_ENABLED: "true"
+  # --- MCP bridge (opt in per environment) ---
+  MCP_ENABLED: "false"
+  # --- Observability ---
+  OTEL_ENABLED: "false"

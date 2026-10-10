@@ -16,6 +16,7 @@ from app.cli.main import build_parser
 from app.database.models.enums import MemoryKind
 from app.database.models.memory import MemoryEntry
 from app.memory.service import MemoryService, format_memory_block
+from app.retrieval.embedder import HashingEmbedder, cosine_similarity
 
 _WORKSPACE_ID = uuid.uuid4()
 
@@ -83,6 +84,24 @@ class _FakeRepository:
         self._entries = [entry for entry in self._entries if entry.workspace_id != workspace_id]
         self.deleted += before - len(self._entries)
         return before - len(self._entries)
+
+    async def semantic_search(
+        self,
+        workspace_id: uuid.UUID,
+        embedding: list[float],
+        *,
+        limit: int = 20,
+    ) -> Sequence[MemoryEntry]:
+        candidates = [
+            entry
+            for entry in self._entries
+            if entry.workspace_id == workspace_id and entry.embedding is not None
+        ]
+        candidates.sort(
+            key=lambda entry: cosine_similarity(embedding, entry.embedding or []),
+            reverse=True,
+        )
+        return tuple(candidates[:limit])
 
 
 def _service(entries: list[MemoryEntry] | None = None) -> MemoryService:
@@ -155,6 +174,32 @@ async def test_recall_respects_limit() -> None:
     hits = await service.recall(_WORKSPACE_ID, "topic", limit=2)
 
     assert len(hits) == 2
+
+
+@pytest.mark.asyncio
+async def test_remember_computes_embedding_when_configured() -> None:
+    repo = _FakeRepository([])
+    service = MemoryService(repo, embedder=HashingEmbedder(dimension=16))
+
+    entry = await service.remember(_WORKSPACE_ID, content="a durable fact")
+
+    assert entry.embedding is not None
+    assert len(entry.embedding) == 16
+
+
+@pytest.mark.asyncio
+async def test_recall_blends_semantic_entries() -> None:
+    embedder = HashingEmbedder(dimension=256)
+    pinned = _entry(content="the auth layer pins to asyncpg for pooling")
+    other = _entry(content="unrelated note about logging formats")
+    vectors = await embedder.embed([pinned.content, other.content])
+    pinned.embedding = vectors[0]
+    other.embedding = vectors[1]
+    service = MemoryService(_FakeRepository([other, pinned]), embedder=embedder)
+
+    hits = await service.recall(_WORKSPACE_ID, "asyncpg pooling pins")
+
+    assert hits[0] is pinned
 
 
 @pytest.mark.asyncio

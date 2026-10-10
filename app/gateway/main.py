@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from app.core.config import Settings, get_settings
 from app.core.container import Container
 from app.core.logging import configure_logging, get_logger
-from app.gateway.routes import auth, health, tasks, users
+from app.gateway.routes import auth, health, tasks, ui, users
 from app.monitoring.middleware import ObservabilityMiddleware
 from app.monitoring.telemetry import init_telemetry, shutdown_telemetry
 
@@ -51,6 +51,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth.router, prefix=resolved.api_prefix)
     app.include_router(users.router, prefix=resolved.api_prefix)
     app.include_router(tasks.router, prefix=resolved.api_prefix)
+    app.include_router(ui.router)
     return app
 
 
