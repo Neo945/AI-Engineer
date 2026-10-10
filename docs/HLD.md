@@ -1,11 +1,12 @@
 # High-Level Design (HLD) — coding-agent
 
-Version 1.3 · describes the system as built through **Phase 20** (CLI, auth,
+Version 1.4 · describes the system as built through **Phase 21** (CLI, auth,
 retrieval/embeddings, memory, pipeline + coordinator, review/audit/arch/design/
-analyze/modernize modes, observability, evals, MCP, CI/CD + K8s, Web UI).
+analyze/modernize modes, observability, evals, MCP, CI/CD + K8s, Web UI,
+testing specialist + intent-based selection).
 
 > **Currency note:** this HLD was originally written at Phase 8. It has been
-> updated at a high level through Phase 20, but the authoritative, current
+> updated at a high level through Phase 21, but the authoritative, current
 > deep-dive is [`docs/ARCHITECTURE_AND_SETUP.md`](ARCHITECTURE_AND_SETUP.md).
 > Where the two disagree, that document wins. See
 > [`docs/TARGET_ARCHITECTURE.md`](TARGET_ARCHITECTURE.md) for the roadmap and
@@ -188,10 +189,12 @@ everything through repositories, never via raw SQL.
   with rework counted and bounded by `pipeline_max_passes` so the pipeline
   always terminates.
 - The **coordinator** (`CoordinatorAgent`) makes a cheap no-tool dispatch
-  decision, runs read-only security/performance specialists concurrently
-  (each confined to a `READ_ONLY_TOOLS` allowlist via `LoopAgent.tool_names`,
-  so parallel reads can never mutate the workspace), optionally runs a coder
-  sequentially when changes are needed, then synthesizes one answer.
+  decision, runs read-only security/performance/testing specialists
+  concurrently (each confined to a `READ_ONLY_TOOLS` allowlist via
+  `LoopAgent.tool_names`, so parallel reads can never mutate the workspace),
+  optionally runs a coder sequentially when changes are needed, then
+  synthesizes one answer. An unparseable dispatch reply falls back to
+  keyword hints from `app/agents/intent.py`.
 
 ### 6.4 LLM layer
 
@@ -226,9 +229,10 @@ everything through repositories, never via raw SQL.
 ## 7. Request lifecycle (task run)
 
 ```
-1. POST /sessions/{id}/tasks {"goal": "…", "agent_type": "coder"|"pipeline"|"coordinator"}
+1. POST /sessions/{id}/tasks {"goal": "…", "agent_type": "coder"|"pipeline"|"coordinator"|"auto"}
 2. Gateway: 404 if session missing → create Task (PENDING) → commit → 202
-3. Background: Orchestrator marks RUNNING + started_at → resolves workspace dir
+3. Background: Orchestrator resolves "auto" from the goal (app/agents/intent.py),
+   marks RUNNING + started_at → resolves workspace dir
 4. Build ToolExecutor + agent for task.agent_type
    (coder = single loop; pipeline = planner→coder→reviewer→tester graph;
    coordinator = dispatch → parallel read-only specialists → optional coder → synthesis);
@@ -309,7 +313,7 @@ spawned on the next call.
 
 - **Testability**: pure contract layers (tools, llm) + injectable
    `FakeLLM` + stub executor; integration tests run against real Postgres.
-   642 tests (541 unit / 101 integration) across 122 app modules; `mypy app`
+   661 tests (559 unit / 102 integration) across 123 app modules; `mypy app`
    (strict) and `ruff` clean. 7 Windows-only failures (CRLF/git output).
 - **Extensibility**: new tools = spec + args model + handler, registered in
   `ToolExecutor._register`; new LLM provider = adapter implementing

@@ -6,9 +6,11 @@ task from request to final answer, with the internal machinery explained at
 each stage.
 
 > **Currency note:** this walkthrough was first written at Phase 8. It has
-> been updated through **Phase 20**. The product now has a **Web UI**
+> been updated through **Phase 21**. The product now has a **Web UI**
 > (served at `/ui`), **login/registration**, and **workspace/session APIs**;
-> task creation is **asynchronous** (`202`) with **SSE** streaming. See
+> task creation is **asynchronous** (`202`) with **SSE** streaming, and
+> `engineer run` defaults to `agent_type: "auto"` (the goal picks the agent).
+> See
 > [`docs/ARCHITECTURE_AND_SETUP.md`](ARCHITECTURE_AND_SETUP.md) for the
 > authoritative current reference.
 
@@ -262,7 +264,8 @@ product looks like this from the user's point of view:
 4. A **planner agent** breaks it into steps; **coder, reviewer, and tester
    agents** execute the steps: edit files, run commands and tests in the
    sandbox, review the diff, and fix regressions. *(Done: `pipeline` agent
-   type; a `coordinator` dispatches parallel read-only specialists.)*
+   type; a `coordinator` dispatches parallel read-only security/performance/
+   testing specialists. `agent_type: "auto"` picks the agent from the goal.)*
 5. The whole run **streams live** (SSE/WebSocket) — you watch tool calls and
    file edits as they happen, and can **cancel** or request a retry. *(Done:
    SSE events + cancel/retry.)*

@@ -6,26 +6,27 @@ to achieve), the **deliverables** (what was built), and the **result**
 (how it was verified).
 
 > **Currency note:** Steps 1–11 below are the historical record through
-> Phase 18. Phases 9–20 (retrieval/embeddings, memory, evals, observability,
-> auth, Gemini, modernization, MCP, deployment, Web UI) are summarized in the
-> **Addendum: Steps 12–16** at the end of this document and detailed in
+> Phase 18. Phases 9–21 (retrieval/embeddings, memory, evals, observability,
+> auth, Gemini, modernization, MCP, deployment, Web UI, testing specialist +
+> intent-based selection) are summarized in the
+> **Addendum: Steps 12–17** at the end of this document and detailed in
 > [`docs/ARCHITECTURE_AND_SETUP.md`](ARCHITECTURE_AND_SETUP.md), which is the
 > authoritative current-state reference.
 
 Final state at the time of writing:
 
-- **Tests:** 642 total (541 unit + 101 integration); 534 unit pass with 7
+- **Tests:** 661 total (559 unit + 102 integration); 552 unit pass with 7
   known Windows-only failures (CRLF file reads / git output format)
-- **Linting:** `ruff check` clean, `ruff format --check` clean (179 files)
-- **Types:** `mypy` clean over 122 source files (`mypy app`, strict)
+- **Linting:** `ruff check` clean, `ruff format --check` clean (181 files)
+- **Types:** `mypy` clean over 123 source files (`mypy app`, strict)
 - **Database:** migrations `0001`–`0007` applied, downgrade/upgrade
   round-trips verified
 - **Repository:** committed and pushed to `main` at
   `github.com/Neo945/AI-Engineer`
 - **P1 + P2 complete:** review/audit, architecture, distributed-systems,
   memory, retrieval/embeddings, git, auth, observability, evals,
-  coordinator, modernization, MCP, deployment, Web UI — all done. Only the
-  VS Code extension remains.
+  coordinator, modernization, MCP, deployment, Web UI, testing specialist +
+  intent-based selection — all done. Only the VS Code extension remains.
 
 ---
 
@@ -545,9 +546,28 @@ file lists, and deep dives live in
   task-detail polling with transcript rendering. Wired into the app without
   the `/api/v1` prefix.
 
+### Step 17 — Testing specialist + intent-based selection (Phase 21)
+
+- `app/agents/intent.py` — deterministic goal classifier: `Intent`,
+  `AGENT_TYPES`, `classify_intent(goal)` (specialist keywords → coordinator;
+  multi-step change → pipeline; otherwise coder), and
+  `resolve_agent_type(agent_type, goal)` (`"auto"` → classified type).
+- `app/agents/coordinator.py` — added a **testing** specialist; the dispatch
+  prompt offers security/performance/testing, and an unparseable dispatch
+  reply falls back to the intent classifier's keyword hints.
+- `app/orchestrator/orchestrator.py` — resolves `agent_type == "auto"` from
+  the goal before the `RUNNING` transition so the concrete type is persisted.
+- `app/cli/main.py` / `app/cli/commands.py` — `engineer run --agent-type`
+  defaults to `auto` (accepts `auto|coder|pipeline|coordinator`) and prints
+  `auto → <resolved>`.
+- `app/core/config.py` — `coordinator_max_specialists` default `2` → `3`.
+- Tests: `tests/unit/test_intent.py` (new), coordinator tests for the testing
+  specialist and the fallback, CLI default assertion, and an integration test
+  that a `"auto"` task resolves from the goal.
+
 ### Addendum result
 
-- Full suite: 642 tests (541 unit / 101 integration); ruff + `mypy app`
+- Full suite: 661 tests (559 unit / 102 integration); ruff + `mypy app`
   clean; 7 known Windows-only failures.
-- All roadmap items through Phase 20 complete; only the VS Code extension
+- All roadmap items through Phase 21 complete; only the VS Code extension
   remains.

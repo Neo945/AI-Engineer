@@ -5,7 +5,7 @@ plans work, edits files, runs commands and tests, reviews its own output,
 and deploys — the architecture lineage of Cursor Agent, Claude Code, Devin,
 and GitHub Copilot Workspace.
 
-**Status:** All planned phases complete (through Phase 20). The provider-agnostic
+**Status:** All planned phases complete (through Phase 21). The provider-agnostic
 LLM abstraction (Anthropic, OpenAI, Gemini, OpenAI-compatible local backends),
 LangGraph agents, the orchestrator, and the gateway task API exist and are
 tested. Tasks run **asynchronously** (`POST /sessions/{id}/tasks` returns
@@ -19,7 +19,13 @@ pending or running task cooperatively. Beyond the single `coder` agent, a
 task can run the **multi-agent pipeline**
 (`agent_type: "pipeline"`): planner → coder → reviewer → tester in one
 LangGraph graph, with reviewer/tester rejection routing back to the coder
-for rework (bounded by `pipeline_max_passes`). Durable per-workspace
+for rework (bounded by `pipeline_max_passes`). A third mode, the
+**coordinator** (`agent_type: "coordinator"`), makes a cheap dispatch
+decision and runs parallel read-only **security / performance / testing**
+specialists before synthesizing one answer (optionally running the coder
+when changes are needed). `agent_type: "auto"` — the `engineer run`
+default — uses a deterministic goal classifier (`app/agents/intent.py`) to
+pick `coder`, `pipeline`, or `coordinator`. Durable per-workspace
 **memory** is recalled and injected into each run
 (`engineer memory add|list|recall|clear`), and a headless **eval harness**
 (`engineer eval`) runs six SWE-bench-style benchmarks against any LLM,

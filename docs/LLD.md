@@ -1,11 +1,11 @@
 # Low-Level Design (LLD) — coding-agent
 
-Version 1.3 · describes the implementation through **Phase 20** (CLI, auth,
+Version 1.4 · describes the implementation through **Phase 21** (CLI, auth,
 retrieval/embeddings, memory, pipeline + coordinator, modes, observability,
-evals, MCP, deployment, Web UI).
+evals, MCP, deployment, Web UI, testing specialist + intent-based selection).
 
 > **Currency note:** this LLD was originally written at Phase 8. The sections
-> below are updated at a high level through Phase 20, but the authoritative,
+> below are updated at a high level through Phase 21, but the authoritative,
 > current deep-dive is [`docs/ARCHITECTURE_AND_SETUP.md`](ARCHITECTURE_AND_SETUP.md).
 > Where they disagree, that document wins. Some Phase 1–8 internals (e.g. the
 > class-level detail of the orchestrator/loop) are retained as reference.
@@ -40,15 +40,20 @@ app/
 │   ├── session.py            #   create_session_factory (expire_on_commit=False)
 │   ├── base.py               #   DeclarativeBase
 │   ├── models/               #   user, workspace, session, task, message,
-│   │                         #   code_chunk, enums, mixins
-│   └── repositories/         #   base, user, workspace, session, task, message
+│   │                         #   code_chunk, memory, enums, mixins
+│   └── repositories/         #   base, user, workspace, session, task, message,
+│                             #   code_chunk (embedding_search), memory
 ├── orchestrator/
 │   └── orchestrator.py       #   Orchestrator, OrchestratorEvent
 ├── agents/
 │   ├── base.py                #   LoopAgent (shared loop), LoopResult, format_tool_result
 │   ├── coder.py               #   CoderAgent (LoopAgent subclass), coder system prompt
 │   ├── coordinator.py         #   CoordinatorAgent (dispatch → parallel read-only specialists)
-│   └── pipeline.py            #   PipelineAgent (planner→coder→reviewer→tester), parse_verdict
+│   ├── intent.py              #   classify_intent/resolve_agent_type (agent_type: "auto")
+│   ├── pipeline.py            #   PipelineAgent (planner→coder→reviewer→tester), parse_verdict
+│   ├── planner.py             #   PlannerAgent
+│   ├── planning.py            #   plan schema/parsing helpers
+│   └── repair.py              #   RepairAgent (test-and-repair loop)
 ├── llm/
 │   ├── messages.py           #   ChatMessage, ChatRole, ToolRequest
 │   ├── protocol.py           #   LLMProvider, LLMResponse, LLMStreamEvent, LLMUsage
@@ -348,7 +353,8 @@ Orchestrator(session_factory, llm, settings, on_event=None,
   #   1. get_for_run(for_update=True)  # row lock → status guard is atomic
   #        else ValueError; if terminal → return unchanged (noop for retries);
   #        if RUNNING → ValueError ("task already running")
-  #   2. status=RUNNING; attempt+=1; started_at=now; commit   # durable checkpoint
+  #   2. if agent_type == "auto": resolve from goal (app/agents/intent.py);
+  #        status=RUNNING; attempt+=1; started_at=now; commit  # durable checkpoint
   #   3. emit "started"
   #   4. executor = executor_factory(workspace_dir) | ToolExecutor.build(...)
   #   5. ordinal_base = max_ordinal(session)   # -1 for an empty session
@@ -438,7 +444,9 @@ dependencies.py
 routes/tasks.py
   async get_session_or_404(session_id, db) -> Session    # 404 dependency
   POST /sessions/{session_id}/tasks   → 202 TaskResponse
-       body TaskCreateRequest{goal 1..4000, agent_type default "coder"}
+       body TaskCreateRequest{goal 1..4000, agent_type default "coder"
+         ("coder"|"pipeline"|"coordinator"|"auto"); "auto" is resolved from the
+         goal at run start via app/agents/intent.py}
        create task (PENDING, max_attempts=settings.task_max_attempts) → commit →
          BackgroundTasks.add_task(orchestrator.run_task, task.id) → return
   GET  /sessions/{session_id}/tasks   → list[TaskResponse]  (limit 1..500, offset ≥ 0)
@@ -711,7 +719,7 @@ per-task cost accounting.
 | `LLM_TIMEOUT_SECONDS` | `120` | ≥1 |
 | `TASK_MAX_ATTEMPTS` | `3` | retry budget per task (≥1) |
 | `PIPELINE_MAX_PASSES` | `2` | rework rounds allowed in the multi-agent pipeline (≥0) |
-| `COORDINATOR_MAX_SPECIALISTS` | `2` | read-only specialists run concurrently by the coordinator (≥1) |
+| `COORDINATOR_MAX_SPECIALISTS` | `3` | read-only specialists run concurrently by the coordinator (≥1) |
 | `TEST_MAX_REPAIRS` / `TEST_COMMAND` | `2` / *(auto)* | test-and-repair bound / test command override |
 | `CLI_STREAM_TOKENS` | `true` | stream tokens to the CLI |
 | `RETRIEVAL_ENABLED` / `RETRIEVAL_MAX_CHUNKS` / `RETRIEVAL_MAX_CHARS` | `true` / `20` / `12000` | context assembly bounds |
@@ -759,7 +767,8 @@ result, error, attempt, max_attempts, input_tokens, output_tokens,
 started_at, finished_at, created_at, updated_at`. Supported `agent_type`
 values are `coder` (default, single loop), `pipeline` (multi-agent pipeline)
 and `coordinator` (dispatch to parallel read-only specialists + optional
-coder); an unknown type fails the task with a captured
+coder); `auto` resolves one of those from the goal at run start. An unknown
+type fails the task with a captured
 `ValueError: unsupported agent_type: …`.
 
 `TaskDetailResponse` = TaskResponse + `messages: [{id, session_id, task_id,
@@ -797,8 +806,8 @@ ordered by ordinal.
   with `app.dependency_overrides[get_orchestrator]` (async `202` create +
   SSE replay/live streams).
 - Tooling: `make lint` (ruff), `make typecheck` (mypy strict, pydantic +
-  sqlalchemy plugins), `make test`. Current suite: **642 tests** (541 unit /
-  101 integration) across 122 app modules; 7 Windows-only failures (CRLF/git
+  sqlalchemy plugins), `make test`. Current suite: **661 tests** (559 unit /
+  102 integration) across 123 app modules; 7 Windows-only failures (CRLF/git
   output). `ruff` and `mypy app` clean.
 
 Fixtures: `tests/conftest.py` (`settings` → local infra), `FakeLLM`

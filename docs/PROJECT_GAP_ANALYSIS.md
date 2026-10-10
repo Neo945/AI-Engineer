@@ -12,8 +12,9 @@ portfolio-grade AI Software Engineering Agent.
 > **Historical snapshot.** This document captures the gap as it stood at
 > **Phase 8**. The gaps it lists (CLI, retrieval, planning/approval,
 > test-and-repair, memory, human-facing modes, observability, evals, auth, and
-> later legacy modernization, MCP, deployment, and the web UI) have since been
-> closed through **Phase 20** — see **§9 Phase 20 update** at the end for the
+> later legacy modernization, MCP, deployment, the web UI, and the testing
+> specialist + intent-based selection) have since been closed through
+> **Phase 21** — see **§9 Phase 21 update** at the end for the
 > delta. The capability tables below have been updated in place; the detailed
 > §3–§7 prose is preserved as the original Phase-8 assessment.
 
@@ -83,7 +84,7 @@ The project's **largest gaps are all above the runtime core**:
 | Architecture analysis | **Done.** `engineer graph` (dependency graph, hubs/cycles/orphans/layers), `engineer arch` (LLM analysis seeded by graph). | — | P1 |
 | Production audit      | **Done.** `engineer audit` staff-engineer + production-readiness scoring with evidence. | — | P1 |
 | Git integration       | **Done.** 7 git tools (status, diff, commit, log, branch, checkout, push); `engineer commit` with LLM message generation; `engineer pr` with LLM-generated title/summary/tests/risks/migration notes + `gh pr create`. | — | P1 |
-| Multi-agent system    | **Done (P2).** Fixed planner→coder→reviewer→tester pipeline + `CoordinatorAgent` dispatching to parallel read-only security/perf specialists and an optional coder, then synthesizing. | Extend specialists (e.g. testing); parallel execution already in place. | P2 |
+| Multi-agent system    | **Done (P2).** Fixed planner→coder→reviewer→tester pipeline + `CoordinatorAgent` dispatching to parallel read-only specialists (security, performance, testing) and an optional coder, then synthesizing. Intent-based selection (`agent_type: auto`) picks `coder`/`pipeline`/`coordinator` from the goal. | — | P2 |
 | Deployment            | **Done (P2).** Compose for Postgres/Redis; API + executor Dockerfiles; GitHub Actions CI (`ruff`/`mypy`/unit tests) + release (GHCR on `v*`); Kustomize K8s base (`deploy/k8s/`, migration initContainer, health probes) with `make deploy`. | Autoscaling/Helm beyond the Kustomize base. | P2 |
 
 Supplementary rows (not in the required list but material gaps):
@@ -152,10 +153,12 @@ Supplementary rows (not in the required list but material gaps):
 - `app/agents/pipeline.py` — planner→coder→reviewer→tester with rework
   routing bounded by `pipeline_max_passes`.
 - `app/agents/coordinator.py` — `CoordinatorAgent` dispatches to parallel
-  read-only security/perf specialists (confined to `READ_ONLY_TOOLS`) and an
-  optional coder, then synthesizes one answer.
-- Remaining P2: more specialists (e.g. testing), intent-based agent selection
-  across all modes rather than only the fixed `agent_type` set.
+  read-only specialists (security, performance, testing; confined to
+  `READ_ONLY_TOOLS`) and an optional coder, then synthesizes one answer.
+  An unparseable dispatch reply falls back to keyword hints.
+- `app/agents/intent.py` — deterministic goal classifier; `agent_type: auto`
+  (the `engineer run` default) resolves to `coder`/`pipeline`/`coordinator`
+  before the task runs.
 
 ### 3.4 Tool system (P0) — Done, with listed additions
 
@@ -337,9 +340,9 @@ implementation plan.
 
 ---
 
-## 9. Phase 20 update
+## 9. Phase 21 update
 
-Every gap in §1 above was closed between Phase 9 and Phase 20. Delta since the
+Every gap in §1 above was closed between Phase 9 and Phase 21. Delta since the
 original audit:
 
 | Area | Status | Where |
@@ -358,9 +361,10 @@ original audit:
 | MCP integration | Done | `app/mcp`, `mcp_call` tool |
 | Deployment | Done | `.github/workflows/{ci,release}.yml`, `deploy/k8s/` |
 | Web UI | Partial | `/ui` SPA in `app/gateway/routes/ui.py` (VS Code extension not built) |
+| Coordinator specialists + intent | Done | `testing` specialist in `app/agents/coordinator.py`; `agent_type: auto` via `app/agents/intent.py` |
 
-**Current metrics (Phase 20):** 122 source files, 57 test files, 22 packages,
-**642 tests** (541 unit + 101 integration), `ruff` and `mypy --strict` clean.
+**Current metrics (Phase 21):** 123 source files, 58 test files, 22 packages,
+`ruff` and `mypy --strict` clean.
 
 **Remaining:** a VS Code extension (browser UI already ships at `/ui`) and
 autoscaling beyond the Kustomize base.

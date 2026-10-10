@@ -94,11 +94,12 @@ layer** (indexer, retrieval, code graph, memory), and the **modes** that sit
 on top of the loop (test-and-repair, review/audit, system design,
 distributed-systems analysis).
 
-> **Status (current, through Phase 20):** every item below is implemented —
+> **Status (current, through Phase 21):** every item below is implemented —
 > CLI, indexer/retrieval (embeddings + semantic search), code graph, memory,
 > test-and-repair, review/audit/arch/design/analyze/modernize modes, auth +
 > workspace/session APIs, observability, evals, coordinator/parallel
-> specialists, MCP integration, CI/CD + K8s deployment, and a Web UI at
+> specialists (security, performance, testing) with intent-based selection,
+> MCP integration, CI/CD + K8s deployment, and a Web UI at
 > `/ui`. The **only unbuilt interface is the VS Code extension**. See
 > `docs/ARCHITECTURE_AND_SETUP.md` for the authoritative current-state
 > description.
@@ -113,7 +114,8 @@ distributed-systems analysis).
 | Agent Orchestrator | `app/orchestrator/orchestrator.py` | **Keep.** |
 | Agent loop | `app/agents/base.py` (`LoopAgent`) | **Keep.** |
 | Coder | `app/agents/coder.py` | **Keep.** |
-| Coordinator (parallel specialists) | `app/agents/coordinator.py` | **Done (P2, item 16).** Dispatch → parallel read-only security/perf specialists → optional coder → synthesis; `READ_ONLY_TOOLS` allowlist. |
+| Coordinator (parallel specialists) | `app/agents/coordinator.py` | **Done (P2, item 16).** Dispatch → parallel read-only security/performance/testing specialists → optional coder → synthesis; `READ_ONLY_TOOLS` allowlist. |
+| Intent classifier | `app/agents/intent.py` | **Done (P2, item 16).** `classify_intent`/`resolve_agent_type`; `agent_type: "auto"` picks coder/pipeline/coordinator from the goal. |
 | Pipeline (planner/coder/reviewer/tester) | `app/agents/pipeline.py` | **Keep.** Reused by the coordinator and modes. |
 | LLM abstraction | `app/llm/` (protocol, openai, anthropic, gemini, factory) | **Keep.** Gemini **done (P1)** — `app/llm/clients/gemini.py`. |
 | Tool contracts | `app/tools/` (`ToolCall`/`ToolResult`/`ToolSpec`, registry) | **Keep.** 17 tools incl. `mcp_call`. |
@@ -174,7 +176,9 @@ Order matters; each step keeps the suite green.
    - Rich TTY UX: streaming output, progress, tool-visibility, cancellation,
      history, structured errors.
    - Wire the CLI to the in-process orchestrator + a fixture workspace;
-     `engineer "goal"` runs `coder` and, on `agent_type`, the pipeline.
+     `engineer "goal"` runs `coder` and, on `agent_type`, the pipeline
+     (`engineer run` now defaults to `agent_type: "auto"`, which picks the
+     agent from the goal).
 2. **P0-B Repository discovery + indexing**
    - `engineer init` / `engineer index`: walk the workspace, detect language
      (Python/Java/TypeScript/JavaScript first), chunk source files into
@@ -237,10 +241,11 @@ Order matters; each step keeps the suite green.
 
 16. **Coordinator + parallel agents**: intent → dispatch to specialized
     agents (security/perf/testing) when valuable, parallel where safe.
-    **Done (Phase 18)** — `CoordinatorAgent` dispatches to read-only
-    security/performance specialists (capped by `coordinator_max_specialists`)
-    and optionally a coder, then synthesizes. Testing dispatch is a future
-    extension.
+    **Done (Phase 18/21)** — `CoordinatorAgent` dispatches to read-only
+    security/performance/testing specialists (capped by
+    `coordinator_max_specialists`) and optionally a coder, then synthesizes.
+    Intent-based selection (`agent_type: "auto"` → `app/agents/intent.py`)
+    picks coder/pipeline/coordinator from the goal.
 17. **Legacy modernization**, security/performance analysis modes.
     **Done (Phase 17)** — `engineer modernize` produces a structured
     modernization report (migration steps + findings); security/performance
@@ -267,10 +272,11 @@ Order matters; each step keeps the suite green.
   scores cite evidence; memory is inspectable; auth protects every endpoint;
   evals run 6 benchmark tasks headlessly with result store and model comparison.
 - **P2 exit criteria:** **Done.** coordinator + MCP adapter + modernization
-  mode + CI/CD & K8s deployment + Web UI (`/ui`) shipped. Current suite:
-  122 app modules, 642 tests (541 unit / 101 integration); 7 Windows-only
-  failures (CRLF/git output), ruff + `mypy app` clean. Remaining: VS Code
-  extension; optional K8s autoscaling/Helm.
+  mode + CI/CD & K8s deployment + Web UI (`/ui`) shipped; coordinator now
+  includes a testing specialist and `agent_type: "auto"` intent selection.
+  Current suite: 123 app modules, 661 tests (559 unit / 102 integration); 7
+  Windows-only failures (CRLF/git output), ruff + `mypy app` clean. Remaining:
+  VS Code extension; optional K8s autoscaling/Helm.
 
 ---
 

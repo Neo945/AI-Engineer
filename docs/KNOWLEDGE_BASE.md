@@ -10,11 +10,11 @@ state of the work. It is the single reference for resuming the session.
 | | |
 |---|---|
 | **Repo** | `C:\Users\Administrator\Downloads\AI-Engineer` (project name: `coding-agent`, not "codingagnet") |
-| **Git branch** | `main`; Phases 18–20 changes are **uncommitted** in this session |
+| **Git branch** | `main`; Phase 21 changes are uncommitted in this session |
 | **Python** | 3.13, `asyncio` (single event loop per CLI run) |
 | **Dependencies** | FastAPI, SQLAlchemy 2 async + Alembic, PostgreSQL (pgvector), Redis, LangGraph, Pydantic v2, structlog, OpenTelemetry, rich (CLI), httpx, google-genai |
 | **Infra** | `docker compose` (PostgreSQL + Redis), `infra/executor/Dockerfile` sandbox image |
-| **Status line** | Phase 20 (web UI) complete; all P0/P1/P2 items done except a VS Code extension |
+| **Status line** | Phase 21 (testing specialist + intent selection) complete; all P0/P1/P2 items done except a VS Code extension |
 
 The repo was previously tracked on macOS at `~/Downloads/projects/AI Engineer/coding-agent`
 and is now worked in at `C:\Users\Administrator\Downloads\AI-Engineer` on Windows.
@@ -89,18 +89,20 @@ orchestrator, agents, llm) and predate the visible git log.
 | `5fe4991` | 15 | **Dependency graph + LLM architecture analysis**: `app/architecture/` (`deps`, `render`, `report`); fixed 3 `deps.py` bugs (DependencyEdge `order=True`, TS `./x` resolution, Python absolute-import tree search); `engineer graph` (text/`--mermaid`/`--include-unresolved`/`--max-nodes`/focus node/`--depth`) + `engineer arch` |
 | `1748c76` | 16 | **System-design mode** (`engineer design "<goal>"`): `app/design/` (`DesignReport`: summary, assumptions, architecture, components, API, data model, events, caching, failure handling, scaling, observability, Mermaid, risks); repo-independent (works outside a bound workspace) |
 | `bad4421` | 17 | **Distributed-systems analysis** (`engineer analyze`): `app/analysis/` (`scan.py` deterministic concern scanner for sync/async HTTP, retries, idempotency, concurrency, locking, caching, timeouts, circuit breakers, messaging; `report.py` LLM interpretation into `AnalysisReport` with `ReviewFinding` findings + recommendations); `--scan-only` skips the LLM |
-| _(uncommitted)_ | — | **Gemini provider**: `app/llm/clients/gemini.py` (`GeminiClient`), wired into `factory.py` (`anthropic`/`openai`/`gemini`); `google-genai` runtime dep |
-| _(uncommitted)_ | — | **Embeddings + semantic search**: `app/retrieval/embedder.py` (`Embedder`, `HashingEmbedder` offline, `OpenAIEmbedder`, `build_embedder`, `cosine_similarity`); retriever/memory/service blend semantic similarity; `CodeChunkRepository.embedding_search`; indexer/memory populate pgvector. Fixed ruff B905 (`strict=True`) and a mypy loop-var shadowing bug |
-| _(uncommitted)_ | 17 | **Legacy modernization**: `app/modernization/` (`ModernizationReport`, `build_modernization_seed`, `parse_modernization_report`, `render_modernization`) + `engineer modernize` (graph-seeded, plan-only) |
-| _(uncommitted)_ | 18 | **MCP integration**: `app/mcp/` (`config`, `client` stdio JSON-RPC 2.0, `manager`); `mcp_call` tool + `ToolName.MCP_CALL`; executor `mcp` wiring; `engineer mcp list` |
-| _(uncommitted)_ | 19 | **Deployment**: `.github/workflows/{ci,release}.yml`, `deploy/k8s/*` (Kustomize), `make deploy`/`deploy-delete`, `pyyaml` dev dep |
-| _(uncommitted)_ | 20 | **Web UI**: `app/gateway/routes/ui.py` + `/ui` SPA (auth, workspaces/sessions, task create, transcript polling), wired in `main.py` without the API prefix |
+| `36ae0f0` | — | **Gemini provider**: `app/llm/clients/gemini.py` (`GeminiClient`), wired into `factory.py` (`anthropic`/`openai`/`gemini`); `google-genai` runtime dep |
+| `36ae0f0` | — | **Embeddings + semantic search**: `app/retrieval/embedder.py` (`Embedder`, `HashingEmbedder` offline, `OpenAIEmbedder`, `build_embedder`, `cosine_similarity`); retriever/memory/service blend semantic similarity; `CodeChunkRepository.embedding_search`; indexer/memory populate pgvector. Fixed ruff B905 (`strict=True`) and a mypy loop-var shadowing bug |
+| `36ae0f0` | 17 | **Legacy modernization**: `app/modernization/` (`ModernizationReport`, `build_modernization_seed`, `parse_modernization_report`, `render_modernization`) + `engineer modernize` (graph-seeded, plan-only) |
+| `36ae0f0` | 18 | **MCP integration**: `app/mcp/` (`config`, `client` stdio JSON-RPC 2.0, `manager`); `mcp_call` tool + `ToolName.MCP_CALL`; executor `mcp` wiring; `engineer mcp list` |
+| `36ae0f0` | 19 | **Deployment**: `.github/workflows/{ci,release}.yml`, `deploy/k8s/*` (Kustomize), `make deploy`/`deploy-delete`, `pyyaml` dev dep |
+| `36ae0f0` | 20 | **Web UI**: `app/gateway/routes/ui.py` + `/ui` SPA (auth, workspaces/sessions, task create, transcript polling), wired in `main.py` without the API prefix |
+| `9048122` | — | **Docs sync** (Phases 18–20): HLD/LLD/development-spec/user-walkthrough/target-architecture updated in place |
+| `607b831` | — | **Docs rescan**: migration table (0001–0007), module mapping, auth endpoints corrected across HLD/LLD/spec/walkthrough/target-architecture |
+| _(uncommitted)_ | 21 | **Testing specialist + intent selection**: `app/agents/intent.py` (`classify_intent`/`resolve_agent_type`); `testing` specialist in `app/agents/coordinator.py`; `agent_type: "auto"` resolved in `orchestrator.run_task`; `engineer run` defaults to `auto`; `coordinator_max_specialists` → 3 |
 
-**Git state note:** `origin/main` is at `4d9a558` (auth); commits
-`d3a6334` → `bad4421` (8 commits) were local-only as of the original KB.
-**This session added Phases 18–20 plus Gemini/embeddings/modernization as
-uncommitted working-tree changes on Windows — no commits were created** (the
-user had not asked for commits).
+**Git state note:** `main` was at `607b831` (docs rescan) with all Phases 18–20
+and the doc syncs committed and pushed to `origin/main`. **This session added
+Phase 21 (testing specialist + intent selection) as uncommitted working-tree
+changes on Windows**; it is committed and pushed separately.
 
 ## 4. Recurring patterns and conventions
 

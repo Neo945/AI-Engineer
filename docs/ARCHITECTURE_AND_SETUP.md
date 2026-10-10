@@ -1,7 +1,7 @@
 # AI Engineer — Full Architecture & Setup Guide
 
-> Generated from full source analysis of the `coding-agent` repository (122
-> source files, 57 test files, 22 packages, Phase 20 complete).
+> Generated from full source analysis of the `coding-agent` repository (123
+> source files, 58 test files, 22 packages, Phase 21 complete).
 
 ---
 
@@ -35,17 +35,17 @@ commands and tests, and returns a summary of what it changed.
 The system follows the architecture lineage of Cursor Agent, Claude Code,
 Devin, and GitHub Copilot Workspace.
 
-### Status at Phase 20
+### Status at Phase 21
 
 | Metric | Value |
 |--------|-------|
-| Source files | 122 |
-| Test files | 57 |
-| Test count | 642 (541 unit + 101 integration) |
+| Source files | 123 |
+| Test files | 58 |
+| Test count | 661 (559 unit + 102 integration) |
 | Lint (`ruff`) | Clean |
 | Type check (`mypy --strict`) | Clean |
 | DB migrations | 0001–0007 (pgvector, core schema, tool_call_id, ordinal, attempt, task plan, memory entries) |
-| Agent types | `coder`, `pipeline`, `coordinator` |
+| Agent types | `coder`, `pipeline`, `coordinator` (+ `auto` resolves one from the goal) |
 | Tools | 17 (filesystem 7, terminal 1, git 7, test 1, MCP 1) |
 | LLM providers | Anthropic, OpenAI, Gemini, OpenAI-compatible local backends |
 | CLI commands | 20+ (init, run, review, audit, graph, arch, design, analyze, modernize, memory, mcp, eval, test, commit, pr, ...) |
@@ -268,7 +268,7 @@ Entry point: `engineer` (defined in `pyproject.toml [project.scripts]`).
 
 **`pipeline.py` — `PipelineAgent`:** LangGraph graph: `planner → coder → reviewer → tester`. Each stage runs a fresh `LoopAgent` via `run_from` (no re-emission of prior messages). Reviewer `CHANGES_NEEDED` and tester `FAIL` route back to coder. Rework bounded by `pipeline_max_passes` (default 2). `parse_verdict` extracts `VERDICT: PASS|CHANGES_NEEDED` from first line.
 
-**`coordinator.py` — `CoordinatorAgent`:** Cheap no-tool dispatch decision → parallel read-only specialists (security, performance, confined to `READ_ONLY_TOOLS` allowlist) via `asyncio.gather` → optional sequential `CoderAgent` → synthesis. `DispatchDecision` parsed from JSON; unparseable → fallback to read-only.
+**`coordinator.py` — `CoordinatorAgent`:** Cheap no-tool dispatch decision → parallel read-only specialists (security, performance, testing, confined to `READ_ONLY_TOOLS` allowlist) via `asyncio.gather` → optional sequential `CoderAgent` → synthesis. `DispatchDecision` parsed from JSON; unparseable → fallback to keyword hints from `app/agents/intent.py` (read-only).
 
 **`repair.py` — `RepairAgent`:** Deterministic test-and-repair loop. Runs tests via `TEST_RUN` tool, parses structured `TestReport`, feeds failures back to LLM for fixes, re-runs tests. Bounded by `max_repairs` (default 2).
 
@@ -507,11 +507,17 @@ goal → Dispatch Decision (no-tool LLM call)
          │
          ├──▶ Security Specialist (read-only, parallel)
          ├──▶ Performance Specialist (read-only, parallel)
+         ├──▶ Testing Specialist (read-only, parallel)
          │
          └──▶ CoderAgent (if needs_changes, sequential)
                   │
                   └──▶ Synthesis (aggregate all findings + changes)
 ```
+
+> An unparseable dispatch reply falls back to deterministic keyword hints
+> (`app/agents/intent.py`), which seed the specialist selection from the goal.
+> The `auto` agent type in `engineer run` / task creation uses the same
+> classifier to pick `coder` / `pipeline` / `coordinator` from the goal.
 
 ### 7.4 Cancel Flow
 
@@ -606,7 +612,7 @@ All via environment variables or `.env` file. Pydantic validates at startup.
 |----------|---------|-------------|
 | `TASK_MAX_ATTEMPTS` | `3` | Retry budget per task |
 | `PIPELINE_MAX_PASSES` | `2` | Rework rounds in pipeline |
-| `COORDINATOR_MAX_SPECIALISTS` | `2` | Concurrent read-only specialists |
+| `COORDINATOR_MAX_SPECIALISTS` | `3` | Concurrent read-only specialists |
 | `TEST_MAX_REPAIRS` | `2` | Fix→re-run iterations |
 | `TEST_COMMAND` | *(empty)* | Override auto-detected runner |
 
@@ -671,7 +677,7 @@ All via environment variables or `.env` file. Pydantic validates at startup.
   "id": "uuid",
   "session_id": "uuid",
   "parent_task_id": null,
-  "agent_type": "coder|pipeline|coordinator",
+  "agent_type": "coder|pipeline|coordinator|auto",
   "status": "pending|planning|running|reviewing|testing|completed|failed|cancelled",
   "goal": "string",
   "result": "string|null",
@@ -723,8 +729,9 @@ engineer status                       # show bound workspace
 engineer index                        # discover + chunk + symbol-extract
 
 # Tasks
-engineer "goal"                       # plan + approve + run
+engineer "goal"                       # plan + approve + run (auto-selects agent)
 engineer run -y "goal"                # auto-approve
+engineer run --agent-type auto         # pick from the goal (default)
 engineer run --agent-type pipeline    # multi-agent pipeline
 engineer run --agent-type coordinator # parallel specialists
 engineer tasks                        # list session tasks
@@ -1025,6 +1032,7 @@ These are environment artifacts. The app is developed and tested on Linux/macOS.
 | 18 (P2) | MCP tool integration (`mcp_call`, `engineer mcp list`) |
 | 19 | Deployment: CI/CD workflows, K8s manifests, `make deploy` |
 | 20 | Web UI (`/ui` single-page app served by the gateway) |
+| 21 | Testing specialist (coordinator) + intent-based agent selection (`agent_type: auto`, `app/agents/intent.py`) |
 
 ### Remaining (P2)
 
