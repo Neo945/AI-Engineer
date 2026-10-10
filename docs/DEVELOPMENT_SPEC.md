@@ -5,18 +5,27 @@ first commit to the current head. Each step lists its **spec** (what it had
 to achieve), the **deliverables** (what was built), and the **result**
 (how it was verified).
 
+> **Currency note:** Steps 1–11 below are the historical record through
+> Phase 18. Phases 9–20 (retrieval/embeddings, memory, evals, observability,
+> auth, Gemini, modernization, MCP, deployment, Web UI) are summarized in the
+> **Addendum: Steps 12–16** at the end of this document and detailed in
+> [`docs/ARCHITECTURE_AND_SETUP.md`](ARCHITECTURE_AND_SETUP.md), which is the
+> authoritative current-state reference.
+
 Final state at the time of writing:
 
-- **Tests:** 548 passing (470 unit + 78 integration + sandbox)
-- **Linting:** `ruff` clean, `ruff format --check` clean
-- **Types:** `mypy` clean over 112 source files
-- **Database:** migrations `0001`–`0005` applied, downgrade/upgrade
+- **Tests:** 642 total (541 unit + 101 integration); 534 unit pass with 7
+  known Windows-only failures (CRLF file reads / git output format)
+- **Linting:** `ruff check` clean, `ruff format --check` clean (179 files)
+- **Types:** `mypy` clean over 122 source files (`mypy app`, strict)
+- **Database:** migrations `0001`–`0007` applied, downgrade/upgrade
   round-trips verified
 - **Repository:** committed and pushed to `main` at
   `github.com/Neo945/AI-Engineer`
-- **P1 complete:** all 8 differentiation items done (review/audit,
-  architecture, distributed-systems, memory, git, auth, observability,
-  evals)
+- **P1 + P2 complete:** review/audit, architecture, distributed-systems,
+  memory, retrieval/embeddings, git, auth, observability, evals,
+  coordinator, modernization, MCP, deployment, Web UI — all done. Only the
+  VS Code extension remains.
 
 ---
 
@@ -458,5 +467,87 @@ With all ten steps in place, an end-to-end request flow is verified:
 
 ### What is intentionally out of scope (future phases)
 
-- Authentication/authorization and user-facing session management
-- Retrieval (AST indexing + embeddings), memory, evals, monitoring
+- VS Code extension (the only unbuilt interface; CLI + Web UI exist)
+- Payments/billing and multi-tenant SaaS wiring
+- Managed Kubernetes autoscaling tuning / Helm charts beyond the provided
+  manifests
+
+---
+
+## Addendum: Steps 12–16 (Phases 9–20)
+
+The Phase 1–18 record above is retained as written. This addendum summarizes
+the later work that brought the project to its current state. Full detail,
+file lists, and deep dives live in
+[`docs/ARCHITECTURE_AND_SETUP.md`](ARCHITECTURE_AND_SETUP.md) and
+[`docs/TARGET_ARCHITECTURE.md`](TARGET_ARCHITECTURE.md).
+
+### Step 12 — Review/audit/architecture/design/analyze modes (Phase 9–12)
+
+- **Review**: `engineer review` — structured findings (severity/file/line/
+  problem/reason/fix).
+- **Audit**: `engineer audit` — staff-engineer + production-readiness scoring
+  backed by evidence.
+- **Architecture graph**: `engineer graph` — deterministic file dependency
+  graph (text + Mermaid) with hub/cycle/orphan/layer metrics;
+  `engineer arch` — LLM analysis seeded by the graph.
+- **Distributed-systems analysis**: `engineer analyze` (deterministic concern
+  scan, `--scan-only` option).
+- **System design**: `engineer design "…"` — architecture, APIs, data/event
+  model, caching, failure handling, scaling, observability, Mermaid diagrams.
+- New packages: `app/audit/`, `app/architecture/`, `app/design/`,
+  `app/analysis/`.
+
+### Step 13 — Retrieval, memory, evals, observability, auth (Phases 9–16)
+
+- **Retrieval**: `app/retrieval/` — `Embedder` protocol (`HashingEmbedder`
+  offline default, `OpenAIEmbedder`), repository indexer (AST/parser chunking
+  into `code_chunks`), `ContextAssembler` with semantic blend, `engineer
+  index`.
+- **Memory**: `app/memory/` — durable session/project/decision memory with
+  embeddings and semantic recall; injected into agent context;
+  `engineer memory add|list|recall|clear`.
+- **Evals**: `app/evals/` — 6 benchmark tasks, headless `EvalRunner`,
+  `ResultStore` (JSONL); `engineer eval list|run|results|compare`.
+- **Observability**: `app/monitoring/` — OpenTelemetry traces/metrics (LLM
+  calls, tokens, duration, tool calls, task runs, HTTP requests),
+  `InstrumentedLLM`, HTTP middleware, token-level streaming to the CLI.
+- **Auth + user APIs**: `register/login/me/password`; user-scoped
+  workspaces and sessions with ownership checks; `app/security/`.
+- **Git workflow**: 7 git tools; `engineer commit` (LLM message generation),
+  `engineer pr` (LLM title/summary/tests/risks + `gh pr create` fallback).
+- Migrations `0006` (`tasks.plan`) and `0007` (`memory_entries`) added.
+
+### Step 14 — Gemini provider + semantic search wiring (Phase 17 precursor)
+
+- `app/llm/clients/gemini.py` (`GeminiClient`) wired into the factory
+  (`providers: anthropic | openai | gemini`) and `.env.example`.
+- Embeddings integrated end-to-end: indexer, `ContextAssembler`, memory
+  service, orchestrator context assembly, and
+  `CodeChunkRepository.embedding_search`.
+
+### Step 15 — Modernization + MCP + deployment (Phases 17–19)
+
+- **Modernization**: `app/modernization/report.py` — `engineer modernize`
+  produces a structured modernization report (migration steps + findings).
+- **MCP**: `app/mcp/` (`MCPClient`/`StdioTransport` JSON-RPC 2.0,
+  `MCPManager`), `mcp_call` tool (`app/tools/specs/mcp.py`), config
+  `mcp_*`, `engineer mcp list`.
+- **Deployment**: GitHub Actions CI (ruff/format/`mypy app`/pytest) + release
+  (GHCR on `v*`); `deploy/k8s/` manifests (namespace, configmap, secret,
+  postgres+pgvector, redis, api with migrate initContainer + probes,
+  ingress, kustomization); `make deploy` / `make deploy-delete`.
+
+### Step 16 — Web UI (Phase 20)
+
+- `app/gateway/routes/ui.py` — an embedded single-page app served at
+  `GET /ui`: login/register, workspaces, sessions, task creation, and
+  task-detail polling with transcript rendering. Wired into the app without
+  the `/api/v1` prefix.
+
+### Addendum result
+
+- Full suite: 642 tests (541 unit / 101 integration); ruff + `mypy app`
+  clean; 7 known Windows-only failures.
+- All roadmap items through Phase 20 complete; only the VS Code extension
+  remains.

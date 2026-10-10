@@ -1,7 +1,15 @@
 # High-Level Design (HLD) — coding-agent
 
-Version 1.2 · applies to the current implementation (Phases 1–8, streaming
-events over SSE, retries/cancellation, multi-agent pipeline)
+Version 1.3 · describes the system as built through **Phase 20** (CLI, auth,
+retrieval/embeddings, memory, pipeline + coordinator, review/audit/arch/design/
+analyze/modernize modes, observability, evals, MCP, CI/CD + K8s, Web UI).
+
+> **Currency note:** this HLD was originally written at Phase 8. It has been
+> updated at a high level through Phase 20, but the authoritative, current
+> deep-dive is [`docs/ARCHITECTURE_AND_SETUP.md`](ARCHITECTURE_AND_SETUP.md).
+> Where the two disagree, that document wins. See
+> [`docs/TARGET_ARCHITECTURE.md`](TARGET_ARCHITECTURE.md) for the roadmap and
+> status. The one unbuilt interface is the VS Code extension.
 
 ---
 
@@ -25,20 +33,20 @@ lineage of Cursor Agent, Claude Code, Devin, and Copilot Workspace.
 - Execute agentic coding work on a user's repository **without ever running
   untrusted commands on the host**.
 - Abstract away LLM vendors so the same agent loop works with Anthropic,
-  OpenAI, and OpenAI-compatible local backends.
+  OpenAI, **Gemini**, and OpenAI-compatible local backends.
 - Persist every task and its full transcript durably (PostgreSQL), so work
   survives restarts and is auditable.
 - Be a clean **modular monolith**: well-separated feature packages that can
   be split into services later if load demands.
+- Offer the same agent core through multiple interfaces: **CLI**, **HTTP
+  API**, and the **Web UI**.
 
 ### Non-goals (for now)
 
-- Frontend, authentication, multi-tenancy, payment/billing.
-- Long-running orchestration across many tasks; automatic retries on
-  transient failures (manual retries and cooperative cancellation are in;
-  automatic retries conflict with the terminal-status SSE close).
-- Multi-agent planning/review/testing pipeline (single coder agent today).
-- Retrieval (AST indexing, embeddings) and long-term memory.
+- VS Code extension (the only unbuilt interface; CLI + Web UI exist).
+- Payments/billing and full multi-tenant SaaS wiring.
+- Long-running orchestration across many tasks with automatic retries on
+  transient failures (manual retries and cooperative cancellation are in).
 
 ## 3. System context
 
@@ -75,8 +83,9 @@ External dependencies:
 
 **Modular monolith** — one deployable process containing strictly separated
 feature packages (`gateway`, `core`, `database`, `orchestrator`, `agents`,
-`tools`, `executor`, `llm`, plus stubs `retrieval`, `memory`, `evals`,
-`monitoring`). Rationale:
+`tools`, `executor`, `llm`, `cli`, `retrieval`, `memory`, `monitoring`,
+`evals`, `mcp`, `modernization`, plus the mode packages `audit`,
+`architecture`, `design`, `analysis`). Rationale:
 
 - **Simplicity of deployment and operations** during rapid development.
 - **Clear seam for extraction**: packages communicate through explicit
@@ -91,20 +100,31 @@ feature packages (`gateway`, `core`, `database`, `orchestrator`, `agents`,
 Layer                 Package           Responsibility
 ────────────────────────────────────────────────────────────────────────
 API / composition     gateway           FastAPI app factory, routers,
-                                        request-scoped dependencies
+                                        request-scoped dependencies, Web UI
 Core                 core              Settings, structured logging, DI
                                        container (composition root)
 Persistence          database          async engine, ORM models,
                                        repositories, Alembic migrations
 Orchestration        orchestrator      per-task state machine, transcript
                                        persistence, lifecycle events
-Agents               agents            LangGraph agent loops (coder today)
+Agents               agents            LangGraph loops (coder, planner,
+                                       reviewer, tester pipeline, coordinator)
 LLM                  llm               provider-agnostic protocol + client
-                                       adapters (Anthropic/OpenAI/local)
+                                       adapters (Anthropic/OpenAI/Gemini/local)
+Understanding        retrieval         repo indexer (AST chunks + embeddings),
+                                       context assembler
+Memory               memory            durable session/project/decision memory
 Tools                tools             typed tool contracts, registry,
                                        tool specs (pure layer, no I/O)
 Execution            executor          ToolExecutor dispatch, path
                                        confinement, Docker sandbox
+Interfaces           cli               `engineer` CLI adapter over the core
+Modes                audit, arch,       review/audit/graph/arch/design/
+                     design, analysis,  analyze/modernize workflows
+                     modernization
+Observability        monitoring        OpenTelemetry traces/metrics, structlog
+Evals                evals             benchmark runner, result store
+Integrations         mcp               MCP stdio client + `mcp_call` tool
 ```
 
 ### 5.1 Dependency rule
@@ -127,10 +147,12 @@ everything through repositories, never via raw SQL.
 ### 6.1 Gateway (FastAPI)
 
 - App factory with lifespan-managed `Container`.
-- Routers: `health` (liveness/readiness) and `tasks`
-  (create+run, list, detail).
+- Routers: `health` (liveness/readiness), `auth` (register/login/me/
+  password), `users` (workspaces + sessions), `tasks` (create+run, list,
+  detail, plan/approve/reject/cancel/events), and `ui` (the single-page Web
+  UI at `/ui`).
 - Request-scoped dependencies: DB session, orchestrator (built lazily),
-  404 session lookup.
+  authenticated user, 404 session lookup.
 - Serialization via Pydantic response schemas (`from_attributes`).
 
 ### 6.2 Orchestrator
@@ -176,8 +198,12 @@ everything through repositories, never via raw SQL.
 - `LLMProvider` protocol exposes `complete()` (single response) and
   `stream()` (event stream) with normalized messages/tools/usage.
 - Adapters: `AnthropicClient` (top-level `system`), `OpenAIClient` (leading
-  `system` message, JSON tool-call args, OpenAI-compatible local backends).
-- Selected by settings via `build_llm_client`.
+  `system` message, JSON tool-call args, OpenAI-compatible local backends),
+  and `GeminiClient` (Google Gen AI SDK).
+- Selected by settings via `build_llm_client` (providers: `anthropic`,
+  `openai`, `gemini`).
+- An `InstrumentedLLM` wrapper records OTel spans/metrics (tokens, latency)
+  around any provider.
 
 ### 6.5 Tools + Executor
 
@@ -193,7 +219,8 @@ everything through repositories, never via raw SQL.
 ### 6.6 Persistence
 
 - Async SQLAlchemy 2.0 + asyncpg. `expire_on_commit=False`.
-- Models: `User`, `Workspace`, `Session`, `Task`, `Message`, `CodeChunk`.
+- Models: `User`, `Workspace`, `Session`, `Task`, `Message`, `CodeChunk`,
+  `MemoryEntry`.
 - Repositories isolate all `select` statements; services never leak SQL.
 
 ## 7. Request lifecycle (task run)
@@ -240,16 +267,21 @@ spawned on the next call.
 
 ## 9. Data model (summary; full detail in LLD)
 
-- **users** — identity (auth not yet wired).
+- **users** — identity (auth wired: register/login/me/password with JWT
+  bearer tokens).
 - **workspaces** — a repository a user works on; `repo_path` is the host
   checkout path the executor confines itself to.
 - **sessions** — durable conversation context bound to a workspace.
 - **tasks** — a unit of work; tree via `parent_task_id`; lifecycle state,
-  goal, result, error, token totals, timestamps.
+  goal, result, error, token totals, timestamps, persisted `plan` for the
+  approve-then-run flow.
 - **messages** — append-only transcript; `ordinal` for deterministic
   ordering (a task persists all its messages in one flush, so timestamps
   alone cannot order them); `tool_call_id`/`tool_calls` for tool round-trips.
-- **code_chunks** — reserved for AST/embedding retrieval.
+- **code_chunks** — AST/chunk index of the workspace with embeddings for
+  semantic retrieval (populated by `engineer index`).
+- **memory_entries** — durable session/project/decision memory with an
+  embedding for semantic recall.
 
 ## 10. Key design decisions
 
@@ -277,7 +309,8 @@ spawned on the next call.
 
 - **Testability**: pure contract layers (tools, llm) + injectable
    `FakeLLM` + stub executor; integration tests run against real Postgres.
-   150 tests passing; `mypy --strict` and `ruff` clean.
+   642 tests (541 unit / 101 integration) across 122 app modules; `mypy app`
+   (strict) and `ruff` clean. 7 Windows-only failures (CRLF/git output).
 - **Extensibility**: new tools = spec + args model + handler, registered in
   `ToolExecutor._register`; new LLM provider = adapter implementing
   `LLMProvider` + factory branch.
@@ -307,5 +340,15 @@ spawned on the next call.
    `pipeline_max_passes`). Stages compose the shared `LoopAgent`; per-stage
    isolation and subtask trees (`parent_task_id`) remain future work.
 4. Auth + user-facing session/workspace management APIs.
+   **Done (Phase 11/16)** — JWT register/login/me/password; user-scoped
+   workspaces and sessions with ownership checks.
 5. Retrieval (AST + embeddings via pgvector) and memory.
+   **Done** — `app/retrieval` (indexer + `ContextAssembler` with semantic
+   blend; pluggable `Embedder`) and `app/memory` (durable, semantic recall).
 6. Evals harness and monitoring (OTel).
+   **Done** — `app/evals` (6 benchmarks, JSONL result store, `engineer eval`)
+   and `app/monitoring` (OTel traces/metrics, HTTP middleware).
+7. Modes (review/audit/arch/design/analyze/modernize), coordinator,
+   MCP tool integration, CI/CD + K8s deployment, and a Web UI.
+   **Done (Phases 17–20)** — see `docs/TARGET_ARCHITECTURE.md`. Remaining:
+   VS Code extension; optional K8s autoscaling/Helm.

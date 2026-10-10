@@ -5,6 +5,13 @@ use it: first how to get it running, then a complete walkthrough of a real
 task from request to final answer, with the internal machinery explained at
 each stage.
 
+> **Currency note:** this walkthrough was first written at Phase 8. It has
+> been updated through **Phase 20**. The product now has a **Web UI**
+> (served at `/ui`), **login/registration**, and **workspace/session APIs**;
+> task creation is **asynchronous** (`202`) with **SSE** streaming. See
+> [`docs/ARCHITECTURE_AND_SETUP.md`](ARCHITECTURE_AND_SETUP.md) for the
+> authoritative current reference.
+
 ---
 
 ## 1. Before you start
@@ -13,16 +20,18 @@ The project is a **modular monolith**: one backend that contains the HTTP
 API (gateway), the agent logic (orchestrator + LangGraph coder), the tool
 layer (sandboxed executor), and the persistence (PostgreSQL + Redis).
 
-It is **not yet a finished product** — there is no frontend, no login, and
-no API to create workspaces/sessions. Today you interact with the running
-backend over HTTP once a workspace and a session exist in the database.
-The walkthrough in section 3 is the complete, current experience; section 4
-describes the end-state vision.
+It is a **finished product** for the CLI, HTTP API, and **Web UI** surfaces:
+you can register/log in, create workspaces and sessions, and run tasks from
+either the `engineer` CLI or a browser. The one remaining (unbuilt) interface
+is a VS Code extension. Section 3 walks the HTTP experience; section 4 covers
+error cases; section 5 is the original end-state vision (now largely
+realized).
 
 ### What you need
 
 - Python 3.13+
-- Docker with Compose v2
+- Docker with Compose v2 (optional — the project supports a code-only setup;
+  see `docs/ARCHITECTURE_AND_SETUP.md`)
 
 ---
 
@@ -46,7 +55,8 @@ make run
 ```
 
 The API listens on `http://localhost:8000`; interactive docs are at
-`http://localhost:8000/docs`.
+`http://localhost:8000/docs`, and the **Web UI** is at
+`http://localhost:8000/ui`.
 
 ### Configure the LLM
 
@@ -54,7 +64,7 @@ The agent is useless without an LLM. Set these in `.env` (copy from
 `.env.example`) or as environment variables:
 
 ```bash
-LLM_PROVIDER=openai            # or "anthropic"
+LLM_PROVIDER=openai            # "openai" | "anthropic" | "gemini"
 LLM_MODEL=gpt-4o-mini
 LLM_API_KEY=sk-...             # your provider key
 # LLM_BASE_URL=http://localhost:8000/v1   # for vLLM/Ollama local backends
@@ -63,10 +73,29 @@ LLM_API_KEY=sk-...             # your provider key
 **Note:** the API starts fine without these — they are only needed when you
 run a task. If they are missing when you do, you get a clear `503`.
 
-### Create a workspace and a session
+### Create a user, workspace, and session
 
-Until workspace/session management is exposed over HTTP, seed one row of
-each directly:
+The easiest path is the **Web UI** at `/ui` (register, then create a
+workspace and session). By API:
+
+```bash
+# 1. Register (returns a bearer token)
+curl -X POST http://localhost:8000/api/v1/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"me@example.com","password":"secret123","full_name":"Me"}'
+
+# 2. Create a workspace (Authorization: Bearer <token>)
+curl -X POST http://localhost:8000/api/v1/workspaces \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"name":"my-repo","repo_path":"/tmp/my-repo"}'
+
+# 3. Create a session in that workspace
+curl -X POST http://localhost:8000/api/v1/workspaces/<workspace-id>/sessions \
+  -H "Authorization: Bearer <token>" -H 'Content-Type: application/json' \
+  -d '{"title":"My session"}'
+```
+
+Alternatively, seed rows directly with SQL (useful for scripted setups):
 
 ```bash
 # Open a SQL shell (or use psql)
@@ -99,11 +128,15 @@ the agent to fix a bug. They send one request:
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/sessions/<session-id>/tasks \
+  -H "Authorization: Bearer <token>" \
   -H 'Content-Type: application/json' \
   -d '{"goal": "The README says the server runs on port 5000 but it runs on 8000. Fix the mismatch."}'
 ```
 
-The request **blocks until the agent finishes**, then returns the task:
+The request returns **immediately** with `202` and the task in `pending`
+state; the agent runs in the background. Track progress either by polling
+`GET /api/v1/tasks/<task-id>` or by opening the SSE stream
+`GET /api/v1/sessions/<session-id>/tasks/<task-id>/events` (replay + live).
 
 ```json
 {
@@ -111,18 +144,23 @@ The request **blocks until the agent finishes**, then returns the task:
   "session_id": "7c2e...",
   "parent_task_id": null,
   "agent_type": "coder",
-  "status": "completed",
+  "status": "pending",
   "goal": "The README says the server runs on port 5000 but it runs on 8000. Fix the mismatch.",
-  "result": "Fixed README. The server binds 0.0.0.0:8000, so the docs now say port 8000.",
+  "result": null,
   "error": null,
-  "input_tokens": 1250,
-  "output_tokens": 310,
-  "started_at": "2026-08-08T09:45:00+00:00",
-  "finished_at": "2026-08-08T09:45:07+00:00",
+  "attempt": 0,
+  "max_attempts": 3,
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "started_at": null,
+  "finished_at": null,
   "created_at": "2026-08-08T09:45:00+00:00",
-  "updated_at": "2026-08-08T09:45:07+00:00"
+  "updated_at": "2026-08-08T09:45:00+00:00"
 }
 ```
+
+Once the run finishes, the same task reports `status: "completed"` with the
+`result`, token totals, and timestamps filled in.
 
 ### 3.2 What happened inside — stage by stage
 
@@ -183,40 +221,55 @@ curl http://localhost:8000/api/v1/healthz   # {"status": "ok"} always
 curl http://localhost:8000/api/v1/readyz    # reports database + redis reachability
 ```
 
+### 3.6 The Web UI
+
+Open `http://localhost:8000/ui` in a browser for a single-page app that
+wraps the same API: register/log in, manage workspaces and sessions, create
+tasks, and watch a task's transcript update live (the page polls the task
+detail endpoint until it reaches a terminal status).
+
 ---
 
 ## 4. Error cases the user will meet
 
 | Situation | What the user sees |
 |-----------|--------------------|
+| Missing/invalid bearer token | `401` unauthorized |
+| Registering an existing email | `409` conflict |
 | LLM not configured (`LLM_API_KEY` unset, no local `base_url`) | `503` with `"LLM is not configured; set LLM_PROVIDER, LLM_API_KEY, and/or LLM_BASE_URL"` |
 | Session id doesn't exist | `404` `"session not found"` |
 | Task id doesn't exist | `404` `"task not found"` |
 | Goal missing/empty | `422` validation error from FastAPI |
-| Agent run crashes mid-way | Task is persisted as `FAILED` with `error` set, e.g. `RuntimeError: ...`; the transcript up to the failure may be empty |
+| Agent run crashes mid-way | Task is persisted as `FAILED` with `error` set, e.g. `RuntimeError: ...`; the partial transcript is retained |
 
 A failed run does **not** raise an HTTP 500 — the task record carries the
 failure, so a polling client gets a consistent story.
 
 ---
 
-## 5. The end-state vision (roadmap)
+## 5. The end-state vision (roadmap — largely realized)
 
-Today is the "agent core". The full product will look like this from the
-user's point of view:
+Today is the "agent core" **plus** its first product surfaces. The full
+product looks like this from the user's point of view:
 
-1. **Sign in** to a web app and link a Git repository.
+1. **Sign in** to a web app and link a Git repository. *(Web UI + auth done;
+   Git linking by `repo_path` today.)*
 2. The backend **clones** the repo into a sandbox workspace and indexes it
-   (AST + embeddings for semantic search).
+   (AST + embeddings for semantic search). *(Indexing + embeddings done via
+   `engineer index`; automatic clone-on-link is future work.)*
 3. You **describe a task in chat** — fix a bug, add a feature, refactor.
+   *(Done: Web UI / CLI / API.)*
 4. A **planner agent** breaks it into steps; **coder, reviewer, and tester
    agents** execute the steps: edit files, run commands and tests in the
-   sandbox, review the diff, and fix regressions.
+   sandbox, review the diff, and fix regressions. *(Done: `pipeline` agent
+   type; a `coordinator` dispatches parallel read-only specialists.)*
 5. The whole run **streams live** (SSE/WebSocket) — you watch tool calls and
-   file edits as they happen, and can **cancel** or request a retry.
+   file edits as they happen, and can **cancel** or request a retry. *(Done:
+   SSE events + cancel/retry.)*
 6. Finished work is presented as a **summary + diff**, with per-task token
-   cost; you decide whether to keep the changes and push.
+   cost; you decide whether to keep the changes and push. *(Done: task
+   result/diff + token accounting; `engineer commit`/`pr`.)*
 
 Everything already built (tool executor, LLM abstraction, coder loop,
 durable transcripts, lifecycle events) is the foundation that this vision
-stands on.
+stands on. The remaining item is the VS Code extension.

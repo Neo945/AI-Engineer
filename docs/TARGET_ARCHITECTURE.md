@@ -94,36 +94,47 @@ layer** (indexer, retrieval, code graph, memory), and the **modes** that sit
 on top of the loop (test-and-repair, review/audit, system design,
 distributed-systems analysis).
 
+> **Status (current, through Phase 20):** every item below is implemented —
+> CLI, indexer/retrieval (embeddings + semantic search), code graph, memory,
+> test-and-repair, review/audit/arch/design/analyze/modernize modes, auth +
+> workspace/session APIs, observability, evals, coordinator/parallel
+> specialists, MCP integration, CI/CD + K8s deployment, and a Web UI at
+> `/ui`. The **only unbuilt interface is the VS Code extension**. See
+> `docs/ARCHITECTURE_AND_SETUP.md` for the authoritative current-state
+> description.
+
 ---
 
 ## 2. Module mapping (existing → target)
 
 | Target component | Existing module | Status |
 |---|---|---|
-| HTTP Gateway | `app/gateway/` (FastAPI, SSE, retry/cancel) | **Keep.** Add auth later (P1). |
+| HTTP Gateway | `app/gateway/` (FastAPI, SSE, retry/cancel) | **Keep.** Auth, workspaces, sessions, UI wired (P1/P2). |
 | Agent Orchestrator | `app/orchestrator/orchestrator.py` | **Keep.** |
 | Agent loop | `app/agents/base.py` (`LoopAgent`) | **Keep.** |
 | Coder | `app/agents/coder.py` | **Keep.** |
 | Coordinator (parallel specialists) | `app/agents/coordinator.py` | **Done (P2, item 16).** Dispatch → parallel read-only security/perf specialists → optional coder → synthesis; `READ_ONLY_TOOLS` allowlist. |
 | Pipeline (planner/coder/reviewer/tester) | `app/agents/pipeline.py` | **Keep.** Reused by the coordinator and modes. |
-| LLM abstraction | `app/llm/` (protocol, openai, anthropic, factory) | **Keep.** Add Gemini (P1). |
-| Tool contracts | `app/tools/` (`ToolCall`/`ToolResult`/`ToolSpec`, registry) | **Keep.** Add tools (P0). |
+| LLM abstraction | `app/llm/` (protocol, openai, anthropic, gemini, factory) | **Keep.** Gemini **done (P1)** — `app/llm/clients/gemini.py`. |
+| Tool contracts | `app/tools/` (`ToolCall`/`ToolResult`/`ToolSpec`, registry) | **Keep.** 17 tools incl. `mcp_call`. |
 | Tool executor | `app/executor/executor.py` | **Keep.** |
 | Terminal sandbox | `app/executor/sandbox.py` | **Keep.** |
 | Path confinement | `app/executor/paths.py` | **Keep.** |
-| Persistence | `app/database/` (models, repos, Alembic, pgvector) | **Keep.** Add `code_chunks` repo + index. |
-| Event bus / streaming | `app/orchestrator/broker.py` + SSE routes | **Keep.** Add token-level streaming (P1). |
-| **CLI** | — | **New (P0).** Thin adapter over orchestrator + a shared client. |
-| **Repository indexer** | `app/retrieval/` (empty) | **New (P0).** |
-| **Retrieval / context engine** | `app/retrieval/` + `code_chunks` | **New (P0).** |
+| Persistence | `app/database/` (models, repos, Alembic, pgvector) | **Keep.** `code_chunks` + `memory_entries` repos and embedding indexes **done**. |
+| Event bus / streaming | `app/orchestrator/broker.py` + SSE routes | **Keep.** Token-level streaming **done (P1)**. |
+| **CLI** | `app/cli/` | **Done (P0).** Thin adapter over orchestrator + shared client; 25+ subcommands. |
+| **Repository indexer** | `app/retrieval/indexer.py` | **Done (P0).** AST/parser chunking + embeddings; `engineer index`. |
+| **Retrieval / context engine** | `app/retrieval/` + `code_chunks` | **Done (P0).** `ContextAssembler` with semantic blend; `embedder.py`. |
 | **Code graph** | `app/architecture/` (`deps`, `render`) | **Done (P1).** `engineer graph` text/Mermaid; metrics (hubs/cycles/orphans/layers). |
-| **Memory** | `app/memory/` (empty) | **New (P1).** |
-| **Test-and-repair loop** | — | **New (P0).** |
-| **Modes** (audit/design/analyze/modernize) | `app/audit/`, `app/architecture/`, `app/design/`, `app/analysis/` | **Partial (P1/P2).** audit + arch + design + distributed-systems analysis done; modernize open. |
-| **Observability** | `app/monitoring/` (empty) + structlog | **New (P1).** |
-| **Evals harness** | `app/evals/` (empty) | **New (P1).** |
-| **Auth** | `users` model + repo only | **New (P1).** |
-| Deployment | `docker-compose.yml`, `infra/*` | **Keep.** Add CI/CD + K8s (P2). |
+| **Memory** | `app/memory/` (service + repo) | **Done (P1).** Durable session/project/decision memory; semantic recall; `engineer memory`. |
+| **Test-and-repair loop** | `app/agents/pipeline.py` (tester/repair nodes) | **Done (P0).** Real `test_run` parsing + bounded repair (`test_max_repairs`). |
+| **Modes** (audit/design/analyze/modernize) | `app/audit/`, `app/architecture/`, `app/design/`, `app/analysis/`, `app/modernization/` | **Done (P1/P2).** audit + arch + design + distributed-systems analysis + modernize all complete. |
+| **Observability** | `app/monitoring/` + structlog + OTel | **Done (P1).** Traces/metrics, `InstrumentedLLM`, HTTP middleware. |
+| **Evals harness** | `app/evals/` | **Done (P1).** 6 benchmarks, headless runner, JSONL store, `engineer eval`. |
+| **Auth** | `app/security/` + `app/gateway/routes/auth.py` | **Done (P1).** register/login/me/password; user-scoped workspaces/sessions. |
+| **MCP integration** | `app/mcp/` + `app/tools/specs/mcp.py` | **Done (P2, item 18).** Stdio JSON-RPC client; `mcp_call` tool; `engineer mcp list`. |
+| **Web UI** | `app/gateway/routes/ui.py` | **Done (P2, item 20).** Single-page app served at `/ui` over the same gateway. |
+| Deployment | `docker-compose.yml`, `infra/*`, `.github/workflows/`, `deploy/k8s/` | **Done (P2, item 19).** CI/CD + K8s manifests (autoscaling optional). |
 
 ---
 
@@ -214,7 +225,7 @@ Order matters; each step keeps the suite green.
     `engineer pr` with LLM-generated title/summary/tests/risks/migration notes
     + `gh pr create` (graceful fallback).
 13. **Auth + workspace/session management APIs**: **Done** — register/login/
-    refresh/logout/me; user-scoped workspaces and sessions; ownership checks.
+    me/password; user-scoped workspaces and sessions; ownership checks.
 14. **Observability**: **Done** — OTel traces/metrics (LLM calls, tokens,
     duration, tool calls, task runs, HTTP requests), `InstrumentedLLM` wrapper,
     HTTP middleware, token-level streaming to CLI via `_TokenSink`.
@@ -231,11 +242,18 @@ Order matters; each step keeps the suite green.
     and optionally a coder, then synthesizes. Testing dispatch is a future
     extension.
 17. **Legacy modernization**, security/performance analysis modes.
+    **Done (Phase 17)** — `engineer modernize` produces a structured
+    modernization report (migration steps + findings); security/performance
+    analysis delivered via coordinator specialists and `engineer audit`.
 18. **MCP tool integration** (GitHub/Jira/DBs/cloud) — tool layer is already
-    spec-based; add an MCP adapter.
+    spec-based; add an MCP adapter. **Done (Phase 18)** — stdio JSON-RPC
+    `MCPClient`/`MCPManager`, `mcp_call` tool, `engineer mcp list`.
 19. **Deployment**: CI/CD pipeline, K8s manifests + autoscaling, observability
-    stack.
-20. **Web UI / VS Code extension** on the same gateway.
+    stack. **Done (Phase 19)** — GitHub Actions CI + release, `deploy/k8s/`
+    manifests (autoscaling optional/future), Make targets.
+20. **Web UI / VS Code extension** on the same gateway. **Web UI done
+    (Phase 20)** — single-page app at `/ui`. VS Code extension is the only
+    remaining interface.
 
 ---
 
@@ -244,19 +262,22 @@ Order matters; each step keeps the suite green.
 - **P0 exit criteria:** **Done.** `engineer "task"` on a fixture repo performs
   context → plan → approval → edits → real test run → repair → review
   summary; `engineer diff` shows surgical changes; destructive commands are
-  confirmed; 470 unit + 78 integration tests pass.
+  confirmed; full green unit + integration suites.
 - **P1 exit criteria:** **Done.** every mode has tests with a mock LLM; audit
   scores cite evidence; memory is inspectable; auth protects every endpoint;
   evals run 6 benchmark tasks headlessly with result store and model comparison.
-- **P2 exit criteria:** coordinator done; MCP adapter demoed; deployment
-  manifests included.
+- **P2 exit criteria:** **Done.** coordinator + MCP adapter + modernization
+  mode + CI/CD & K8s deployment + Web UI (`/ui`) shipped. Current suite:
+  122 app modules, 642 tests (541 unit / 101 integration); 7 Windows-only
+  failures (CRLF/git output), ruff + `mypy app` clean. Remaining: VS Code
+  extension; optional K8s autoscaling/Helm.
 
 ---
 
 ## 6. Explicit non-goals (for now)
 
 - No microservices split of the monolith.
-- No Kubernetes until P2.
+- No managed Kubernetes/autoscaling tuning beyond the provided manifests.
 - No payments/billing, no multi-tenant SaaS wiring.
 - No requirement that any mode works without an LLM provider — but every test
   must work with a fake/mock LLM.

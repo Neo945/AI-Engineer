@@ -100,7 +100,7 @@ Supplementary rows (not in the required list but material gaps):
 | LLM provider breadth  | **Done.** `openai`, `anthropic`, `gemini`, local OpenAI-compatible; env-driven via `LLM_PROVIDER`. | — | P1 |
 | Observability         | **Done.** OTel traces/metrics (LLM calls, tokens, duration, tool calls, task runs, HTTP requests), `InstrumentedLLM` wrapper, HTTP middleware, token-level streaming to CLI via `_TokenSink`. | — | P1 |
 | Evaluation framework  | **Done.** 6 benchmark tasks, headless `EvalRunner`, `ResultStore` (JSONL), `engineer eval list|run|results|compare` CLI. | Expand task suite, multi-model parallel runner, CI integration. | P1 |
-| Auth / workspace mgmt | **Done.** Register/login/refresh/logout/me endpoints; user-scoped workspaces and sessions; ownership checks. | — | P1 |
+| Auth / workspace mgmt | **Done.** Register/login/me/password endpoints; user-scoped workspaces and sessions; ownership checks. | — | P1 |
 | System design mode    | **Done.** `engineer design "…"` → architecture, APIs, data/event model, caching, failure handling, scaling, observability, Mermaid diagrams. | — | P1 |
 | Distributed systems analysis | **Done.** `engineer analyze` scans for sync/async HTTP, retries, idempotency, concurrency, locking, caching, timeouts, circuit breakers, messaging. | — | P1 |
 | Legacy modernization  | **Done.** `engineer modernize [--target ...]` seeds the LLM with the dependency graph → ordered migration steps + risks (`ModernizationReport`). | — | P2 |

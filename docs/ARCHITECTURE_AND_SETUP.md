@@ -44,7 +44,7 @@ Devin, and GitHub Copilot Workspace.
 | Test count | 642 (541 unit + 101 integration) |
 | Lint (`ruff`) | Clean |
 | Type check (`mypy --strict`) | Clean |
-| DB migrations | 0001–0005 (pgvector, core schema, tool_call_id, ordinal, attempt) |
+| DB migrations | 0001–0007 (pgvector, core schema, tool_call_id, ordinal, attempt, task plan, memory entries) |
 | Agent types | `coder`, `pipeline`, `coordinator` |
 | Tools | 17 (filesystem 7, terminal 1, git 7, test 1, MCP 1) |
 | LLM providers | Anthropic, OpenAI, Gemini, OpenAI-compatible local backends |
@@ -445,6 +445,8 @@ memory_entries ─────────────────────�
 | 0003 | `messages.tool_call_id`, `messages.tool_calls` (JSONB) |
 | 0004 | `messages.ordinal` (int, indexed) for deterministic transcript ordering |
 | 0005 | `tasks.attempt`, `tasks.max_attempts` for durable retry checkpoint |
+| 0006 | `tasks.plan` (JSONB) persisted task plan for approve-then-run flow |
+| 0007 | `memory_entries` durable workspace memory (+ pgvector embedding) |
 
 ---
 

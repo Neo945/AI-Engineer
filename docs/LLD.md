@@ -1,7 +1,14 @@
 # Low-Level Design (LLD) — coding-agent
 
-Version 1.2 · applies to the current implementation (Phases 1–8, streaming
-events over SSE, retries/cancellation, multi-agent pipeline)
+Version 1.3 · describes the implementation through **Phase 20** (CLI, auth,
+retrieval/embeddings, memory, pipeline + coordinator, modes, observability,
+evals, MCP, deployment, Web UI).
+
+> **Currency note:** this LLD was originally written at Phase 8. The sections
+> below are updated at a high level through Phase 20, but the authoritative,
+> current deep-dive is [`docs/ARCHITECTURE_AND_SETUP.md`](ARCHITECTURE_AND_SETUP.md).
+> Where they disagree, that document wins. Some Phase 1–8 internals (e.g. the
+> class-level detail of the orchestrator/loop) are retained as reference.
 
 Companion to [HLD.md](HLD.md). This document specifies the concrete
 structure: packages, classes with their public interfaces, the database
@@ -20,7 +27,10 @@ app/
 │   ├── schemas.py            #   TaskCreateRequest, TaskResponse, MessageResponse, TaskDetailResponse
 │   └── routes/
 │       ├── health.py         #   /healthz, /readyz
-│       └── tasks.py          #   task run/list/detail + get_session_or_404
+│       ├── auth.py           #   register/login/me/password (JWT)
+│       ├── users.py          #   workspaces + sessions (user-scoped)
+│       ├── tasks.py          #   task run/list/detail/plan/approve/cancel/events
+│       └── ui.py             #   GET /ui — embedded single-page Web UI
 ├── core/
 │   ├── config.py             #   Settings (pydantic-settings)
 │   ├── logging.py            #   structlog configuration
@@ -37,6 +47,7 @@ app/
 ├── agents/
 │   ├── base.py                #   LoopAgent (shared loop), LoopResult, format_tool_result
 │   ├── coder.py               #   CoderAgent (LoopAgent subclass), coder system prompt
+│   ├── coordinator.py         #   CoordinatorAgent (dispatch → parallel read-only specialists)
 │   └── pipeline.py            #   PipelineAgent (planner→coder→reviewer→tester), parse_verdict
 ├── llm/
 │   ├── messages.py           #   ChatMessage, ChatRole, ToolRequest
@@ -44,19 +55,29 @@ app/
 │   ├── factory.py            #   build_llm_client(settings)
 │   └── clients/
 │       ├── anthropic.py      #   AnthropicClient
-│       └── openai.py         #   OpenAIClient (+ OpenAI-compatible local backends)
+│       ├── openai.py         #   OpenAIClient (+ OpenAI-compatible local backends)
+│       └── gemini.py         #   GeminiClient (Google Gen AI SDK)
 ├── tools/
-│   ├── schemas.py            #   ToolName, ToolCall, ToolResult, ToolSpec
+│   ├── schemas.py            #   ToolName (17), ToolCall, ToolResult, ToolSpec
 │   ├── registry.py           #   ToolRegistry, Handler
-│   └── specs/                #   filesystem.py, terminal.py, git.py (+ __init__ aggregation)
+│   └── specs/                #   filesystem.py, terminal.py, git.py, mcp.py
 ├── executor/
-│   ├── executor.py           #   ToolExecutor, GitOutput
+│   ├── executor.py           #   ToolExecutor, GitOutput (+ _mcp_call)
 │   ├── paths.py              #   resolve_within, PathTraversalError
 │   └── sandbox.py            #   SandboxManager, Sandbox, SandboxLimits, SandboxOutput
-├── retrieval/  memory/  evals/  monitoring/   # reserved placeholder packages
-alembic/versions/                            # 0001..0004
+├── cli/                      #   `engineer` CLI adapter (commands.py, main.py, client)
+├── retrieval/                #   embedder.py, indexer.py, retriever.py, context.py
+├── memory/                   #   service.py (durable memory + semantic recall)
+├── monitoring/               #   OTel tracing/metrics, InstrumentedLLM, HTTP middleware
+├── evals/                    #   benchmark tasks, EvalRunner, ResultStore
+├── mcp/                      #   config.py, client.py (stdio JSON-RPC), manager.py
+├── modernization/            #   report.py (modernize mode)
+├── audit/ architecture/ design/ analysis/   # review/audit/graph/design/analyze modes
+├── security/                 #   auth (JWT), password hashing
+alembic/versions/                            # 0001..0007
 tests/
-├── unit/        # config, models, paths, executor_fs, tool_registry, llm_*, coder_agent
+├── unit/        # config, models, paths, executor_fs, tool_registry, llm_*, agents,
+│                #   cli, retrieval, memory, evals, mcp, modernization, ui, deploy
 ├── integration/ # health, repositories, orchestrator, tasks_api
 └── sandbox/     # real Docker sandbox execution
 ```
@@ -86,6 +107,7 @@ tasks
   agent_type varchar(50) | status task_status (pending|planning|running|reviewing|testing|
                                              completed|failed|cancelled)
   goal TEXT | result TEXT? | error TEXT?
+  plan JSONB?                                        # persisted task plan (approve-then-run)
   attempt int (0) | max_attempts int (3)             # durable retry checkpoint
   input_tokens int (0) | output_tokens int (0)
   started_at timestamptz? | finished_at timestamptz? | created_at | updated_at
@@ -97,11 +119,16 @@ messages                                 # append-only (no updated_at)
   tool_call_id varchar(100)? | tool_calls JSONB? | tool_name varchar(100)?
   token_count int (0) | created_at
 
-code_chunks                                # retrieval-scaffolded (Phase 9)
+code_chunks                                # populated by `engineer index`
   id UUID PK | workspace_id FK→workspaces (CASCADE) IX
   file_path varchar(2000) | start_line int | end_line int | content TEXT
   language varchar(50)? | embedding Vector(1536)? | meta JSONB | created_at
-  IX (workspace_id, file_path)
+  IX (workspace_id, file_path)             # + embedding search (cosine)
+
+memory_entries                             # durable workspace memory
+  id UUID PK | workspace_id FK→workspaces (CASCADE) IX
+  kind varchar(50) | content TEXT | embedding Vector(1536)?
+  meta JSONB | created_at
 ```
 
 ### Ordering rules
@@ -122,6 +149,8 @@ code_chunks                                # retrieval-scaffolded (Phase 9)
 | 0003 | `messages.tool_call_id`, `messages.tool_calls` (JSONB) |
 | 0004 | `messages.ordinal` int + index |
 | 0005 | `tasks.attempt`, `tasks.max_attempts` (retry/checkpoint metadata) |
+| 0006 | `tasks.plan` (JSONB) — persisted task plan for approve-then-run |
+| 0007 | `memory_entries` table (+ pgvector embedding) for durable memory |
 
 ## 3. Class design
 
@@ -197,7 +226,7 @@ class LLMResponse(BaseModel): content | tool_requests | stop_reason | usage | mo
 class LLMStreamEvent(BaseModel): type: text|tool_request|usage | text? | tool_request? | usage? | model
 class LLMUsage(BaseModel): input_tokens | output_tokens
 
-build_llm_client(settings) -> LLMProvider      # "anthropic" | "openai" else ValueError
+build_llm_client(settings) -> LLMProvider      # "anthropic" | "openai" | "gemini" else ValueError
 ```
 
 **AnthropicClient** (`clients/anthropic.py`):
@@ -449,9 +478,10 @@ Subtle behaviors (enforced by tests):
 ### 3.8 Tools — `app/tools/`
 
 ```
-ToolName(StrEnum): FILE_READ|FILE_WRITE|FILE_LIST|FILE_SEARCH|FILE_DELETE|FILE_MOVE
-                  |TERMINAL_RUN|GIT_STATUS|GIT_DIFF|GIT_COMMIT
-  # member values are the wire identifiers: "file_read", …, "git_commit"
+ToolName(StrEnum): FILE_READ|FILE_WRITE|FILE_EDIT|FILE_LIST|FILE_SEARCH|FILE_DELETE
+                  |FILE_MOVE|TERMINAL_RUN|TEST_RUN|GIT_STATUS|GIT_DIFF|GIT_COMMIT
+                  |GIT_LOG|GIT_BRANCH|GIT_CHECKOUT|GIT_PUSH|MCP_CALL
+  # member values are the wire identifiers: "file_read", …, "mcp_call"
 
 ToolCall(id=uuid4, tool: ToolName, arguments: dict, timeout_ms: int|None ge=100 le=3_600_000)
 ToolResult(call_id, tool, ok, output="", error=None, exit_code=None, duration_ms=None, truncated=False)
@@ -486,7 +516,7 @@ executor.py  ToolExecutor(workspace_dir, registry, sandboxes, mount_target="/wor
   @classmethod build(workspace_dir, settings, sandboxes=None)
   registry / sandboxes  (properties)
   async execute(call) -> ToolResult          # delegates to registry
-  _register()  # wires all 10 tools to handlers
+  _register()  # wires all 17 tools to handlers (incl. mcp_call when enabled)
   # fs/git handlers run on host via asyncio.to_thread / create_subprocess_exec
   #   (git: GIT_TERMINAL_PROMPT=0, GIT_PAGER=cat, GIT_CONFIG_NOSYSTEM=1, hooksPath=/dev/null)
   # terminal → sandbox.get_or_start(workspace).run(script, timeout_ms, workdir)
@@ -661,12 +691,18 @@ per-task cost accounting.
 | `DATABASE_URL` | `postgresql+asyncpg://coding:coding@localhost:5432/coding_agent` | async URL |
 | `REDIS_URL` | `redis://localhost:6379/0` | |
 | `EMBEDDING_DIMENSION` | `1536` | fixed; never change after inserts |
+| `EMBEDDING_ENABLED` | `true` | enable semantic retrieval/memory |
+| `EMBEDDING_PROVIDER` | `hash` | `hash` (offline default) \| OpenAI-compatible |
+| `EMBEDDING_MODEL` / `EMBEDDING_API_KEY` / `EMBEDDING_BASE_URL` | `text-embedding-3-small` / *(empty)* / *(empty)* | provider settings |
+| `AUTH_SECRET` | `dev-only-secret-change-me-in-prod` | ≥32 chars; **change in prod** |
+| `AUTH_TOKEN_TTL_SECONDS` | `86400` | JWT lifetime (≥60) |
+| `AUTH_TOKEN_ISSUER` | `coding-agent` | JWT `iss` |
 | `EXECUTOR_IMAGE` | `coding-agent-executor:latest` | sandbox image |
 | `SANDBOX_MEMORY_MB` | `512` | ≥128 |
 | `SANDBOX_CPU_NANOS` | `1_000_000_000` | 1e9 = 1 vCPU |
 | `SANDBOX_NETWORK_ENABLED` | `false` | keep off in prod |
 | `SANDBOX_DEFAULT_TIMEOUT_MS` | `30_000` | ≥100 |
-| `LLM_PROVIDER` | `openai` | `anthropic` \| `openai` |
+| `LLM_PROVIDER` | `openai` | `anthropic` \| `openai` \| `gemini` |
 | `LLM_MODEL` | `gpt-4o-mini` | |
 | `LLM_API_KEY` | *(empty)* | falls back to SDK env handling |
 | `LLM_BASE_URL` | *(empty)* | set for vLLM/Ollama local backends |
@@ -676,19 +712,47 @@ per-task cost accounting.
 | `TASK_MAX_ATTEMPTS` | `3` | retry budget per task (≥1) |
 | `PIPELINE_MAX_PASSES` | `2` | rework rounds allowed in the multi-agent pipeline (≥0) |
 | `COORDINATOR_MAX_SPECIALISTS` | `2` | read-only specialists run concurrently by the coordinator (≥1) |
+| `TEST_MAX_REPAIRS` / `TEST_COMMAND` | `2` / *(auto)* | test-and-repair bound / test command override |
+| `CLI_STREAM_TOKENS` | `true` | stream tokens to the CLI |
+| `RETRIEVAL_ENABLED` / `RETRIEVAL_MAX_CHUNKS` / `RETRIEVAL_MAX_CHARS` | `true` / `20` / `12000` | context assembly bounds |
+| `MEMORY_ENABLED` / `MEMORY_MAX_ENTRIES` / `MEMORY_MAX_CHARS` | `true` / `20` / `4000` | memory injection bounds |
+| `EVAL_RESULTS_PATH` / `EVAL_DEFAULT_TIMEOUT_SECONDS` / `EVAL_KEEP_WORKSPACES` | `.engineer/eval-results.jsonl` / `300` / `false` | evals harness |
+| `MCP_ENABLED` / `MCP_SERVERS_FILE` / `MCP_TIMEOUT_SECONDS` | `false` / *(empty)* / `30` | MCP integration |
+| `COMMAND_POLICY_ENABLED` | `true` | destructive-command guard |
+| `GIT_PROTECT_DIRTY_TREE` | `true` | refuse ops on a dirty tree where unsafe |
+| `OTEL_ENABLED` / `OTEL_SERVICE_NAME` / `OTEL_EXPORTER_ENDPOINT` / `OTEL_TRACES_ENABLED` / `OTEL_METRICS_ENABLED` | `false` / `coding-agent` / `http://localhost:4318` / `true` / `true` | observability |
 
 ## 7. API contract
 
 | Method | Path | Success | Errors |
 |---|---|---|---|
+| GET | `/ui` | 200 `text/html` (embedded single-page app) | – |
 | GET | `/api/v1/healthz` | 200 `{"status":"ok"}` | – |
 | GET | `/api/v1/readyz` | 200 `{status, checks:{database,redis}}` | 503 degraded |
-| POST | `/api/v1/sessions/{session_id}/tasks` | 202 `TaskResponse` (status `pending`); runs in background | 404 session, 422 body, 503 LLM unconfigured |
-| GET | `/api/v1/sessions/{session_id}/tasks?limit&offset` | 200 `[TaskResponse]` | 404 session |
-| GET | `/api/v1/tasks/{task_id}` | 200 `TaskDetailResponse` | 404 task |
+| POST | `/api/v1/auth/register` | 201 user + token | 409 email exists, 422 |
+| POST | `/api/v1/auth/login` | 200 token | 401 bad credentials |
+| GET | `/api/v1/auth/me` | 200 user | 401 |
+| POST | `/api/v1/auth/password` | 200 user (password changed) | 401, 422 |
+| POST | `/api/v1/workspaces` | 201 `WorkspaceResponse` | 401, 422 |
+| GET | `/api/v1/workspaces` | 200 list (user-scoped) | 401 |
+| GET | `/api/v1/workspaces/{id}` | 200 `WorkspaceResponse` | 401, 404 |
+| GET | `/api/v1/workspaces/{id}/sessions` | 200 list | 401, 404 |
+| POST | `/api/v1/workspaces/{id}/sessions` | 201 `SessionResponse` | 401, 404 |
+| GET | `/api/v1/sessions/{session_id}` | 200 `SessionResponse` | 401, 404 |
+| POST | `/api/v1/tasks/{task_id}/plan` | 200 plan artifact | 401, 404, 503 LLM unconfigured |
+| POST | `/api/v1/tasks/{task_id}/approve` | 200/202 `TaskResponse` (runs approved plan) | 404, 409 |
+| POST | `/api/v1/tasks/{task_id}/reject` | 200 `TaskResponse` (rejected) | 404, 409 |
+| POST | `/api/v1/tasks/{task_id}/run` | 202 `TaskResponse` (runs in background) | 404, 409 |
+| POST | `/api/v1/sessions/{session_id}/tasks` | 202 `TaskResponse` (status `pending`); runs in background | 401, 404 session, 422 body, 503 LLM unconfigured |
+| GET | `/api/v1/sessions/{session_id}/tasks?limit&offset` | 200 `[TaskResponse]` | 401, 404 session |
+| GET | `/api/v1/tasks/{task_id}` | 200 `TaskDetailResponse` | 401, 404 task |
 | POST | `/api/v1/tasks/{task_id}/retry` | 202 `TaskResponse` (status `pending`); reruns in background | 404 task, 409 not terminal / max attempts |
 | POST | `/api/v1/tasks/{task_id}/cancel` | 200 `TaskResponse` (status `cancelled`) | 404 task, 409 terminal |
-| GET | `/api/v1/sessions/{session_id}/tasks/{task_id}/events` | 200 `text/event-stream` (snapshot + messages + terminal) | 404 session, 404 task |
+| GET | `/api/v1/sessions/{session_id}/tasks/{task_id}/events` | 200 `text/event-stream` (snapshot + messages + terminal) | 401, 404 session, 404 task |
+
+> The exact path/verb set is defined by `app/gateway/routes/{auth,users,tasks,ui}.py`;
+> consult those modules (or the live OpenAPI at `/docs`) for the authoritative
+> list. All `/api/v1` routes except `health` require a bearer token.
 
 `TaskResponse`: `id, session_id, parent_task_id, agent_type, status, goal,
 result, error, attempt, max_attempts, input_tokens, output_tokens,
@@ -733,7 +797,9 @@ ordered by ordinal.
   with `app.dependency_overrides[get_orchestrator]` (async `202` create +
   SSE replay/live streams).
 - Tooling: `make lint` (ruff), `make typecheck` (mypy strict, pydantic +
-  sqlalchemy plugins), `make test`.
+  sqlalchemy plugins), `make test`. Current suite: **642 tests** (541 unit /
+  101 integration) across 122 app modules; 7 Windows-only failures (CRLF/git
+  output). `ruff` and `mypy app` clean.
 
 Fixtures: `tests/conftest.py` (`settings` → local infra), `FakeLLM`
 (scripted responses, records `.calls`), integration `container`/`db_session`
@@ -759,4 +825,6 @@ fixtures, autouse table truncation.
 - **Distributed cancel/signal**: swap `CancellationRegistry` for a shared
   store (Redis) with the same interface when the gateway and orchestrator
   split.
-- **Retrieval**: `CodeChunk` + pgvector are already in the schema.
+- **Retrieval**: implemented — `app/retrieval` (indexer + `ContextAssembler`,
+  pluggable `Embedder`) over `CodeChunk` + pgvector; semantic search via
+  `embedding_search`.
