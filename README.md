@@ -92,7 +92,8 @@ See `docs/` for the full architecture and roadmap.
 ## Prerequisites
 
 - Python 3.13+
-- Docker with Compose v2 (for PostgreSQL + Redis)
+- Docker with Compose v2 (for PostgreSQL + Redis) — **recommended but
+  optional**; see [Running without Docker](docs/ARCHITECTURE_AND_SETUP.md)
 
 ## Quick start
 
@@ -109,6 +110,13 @@ make migrate
 # 4. Run the API (http://localhost:8000, /docs for Swagger)
 make run
 ```
+
+> **Docker is optional.** `make up` (Docker Compose) is the recommended way to
+> provision PostgreSQL + Redis, but the stack also runs against a native
+> PostgreSQL 17 + pgvector and a Redis-compatible server (Memurai). In the
+> current Windows Server environment Docker is **deferred** (enabling it needs a
+> WSL2 reboot), so the backend runs on the native stack — see
+> [Running without Docker](docs/ARCHITECTURE_AND_SETUP.md).
 
 The sandbox integration tests additionally require the executor image:
 

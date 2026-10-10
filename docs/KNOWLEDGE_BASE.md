@@ -9,7 +9,7 @@ state of the work. It is the single reference for resuming the session.
 
 | | |
 |---|---|
-| **Repo** | `C:\Users\Administrator\Downloads\AI-Engineer` (project name: `coding-agent`, not "codingagnet") |
+| **Repo** | `D:\AI-Engineer` (project name: `coding-agent`, not "codingagnet") |
 | **Git branch** | `main`; Phase 21 changes are uncommitted in this session |
 | **Python** | 3.13, `asyncio` (single event loop per CLI run) |
 | **Dependencies** | FastAPI, SQLAlchemy 2 async + Alembic, PostgreSQL (pgvector), Redis, LangGraph, Pydantic v2, structlog, OpenTelemetry, rich (CLI), httpx, google-genai |
@@ -17,7 +17,7 @@ state of the work. It is the single reference for resuming the session.
 | **Status line** | Phase 21 (testing specialist + intent selection) complete; all P0/P1/P2 items done except a VS Code extension |
 
 The repo was previously tracked on macOS at `~/Downloads/projects/AI Engineer/coding-agent`
-and is now worked in at `C:\Users\Administrator\Downloads\AI-Engineer` on Windows.
+and is now worked in at `D:\AI-Engineer` on Windows.
 All project work happens in the repo root; the opencode working directory only
 holds `opencode.json`.
 
@@ -214,7 +214,7 @@ an optional VS Code extension.
 
 ## 8. Working agreements for this session
 
-- Work only in `C:\Users\Administrator\Downloads\AI-Engineer` (Windows).
+- Work only in `D:\AI-Engineer` (Windows).
   Prepend `C:\Program Files\Git\cmd` and the Python 3.13 dir to `PATH` per
   command; use `& ".venv\Scripts\python.exe" -m ...`.
 - Verify with `ruff check app tests`, `ruff format --check app tests`,

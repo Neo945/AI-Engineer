@@ -32,8 +32,11 @@ realized).
 ### What you need
 
 - Python 3.13+
-- Docker with Compose v2 (optional — the project supports a code-only setup;
-  see `docs/ARCHITECTURE_AND_SETUP.md`)
+- Docker with Compose v2 (for PostgreSQL + Redis) — **optional**. Docker is the
+  recommended provisioning path but is **deferred** in the current Windows
+  Server environment (enabling it needs a WSL2 reboot); the backend runs against
+  a native PostgreSQL 17 + pgvector and Memurai (Redis-compatible) instead. See
+  "Running without Docker" in `docs/ARCHITECTURE_AND_SETUP.md`.
 
 ---
 

@@ -905,6 +905,54 @@ git config --global user.email "you@example.com"
 
 **Note on Windows:** 8 unit tests fail due to CRLF line endings in `file_read` output and Windows-specific git output format. These are environment artifacts, not bugs. The app targets Linux/macOS for production use.
 
+### Running without Docker (native PostgreSQL + Redis)
+
+Docker + Compose remains the recommended way to provision PostgreSQL (pgvector)
+and Redis, and is the default throughout these docs. It is **optional**,
+however: the same stack runs against a native PostgreSQL 17 + pgvector and a
+Redis-compatible server, with no Docker involved.
+
+> **Status (current Windows Server environment):** Docker is **not enabled** and
+> the API is run against the **native** stack below. Enabling Docker on Windows
+> Server additionally requires the "Windows Subsystem for Linux" and "Virtual
+> Machine Platform" features (staged here) plus a **reboot**, so Docker is
+> **deferred** until then. Use the native path below in the meantime.
+
+Native components:
+
+- **PostgreSQL 17 + pgvector** — portable binaries plus the prebuilt Windows
+  `vector.dll` (no installer, no Windows service; started with `pg_ctl`).
+- **Redis** — [Memurai](https://www.memurai.com/) Developer, a Redis-compatible
+  server that installs as a Windows service on `:6379`.
+
+```powershell
+# PostgreSQL: init a cluster (data dir on a data drive), start it, create the DB
+D:\pgsql\bin\initdb.exe   -D D:\pgdata -U coding --auth=trust --encoding=UTF8
+D:\pgsql\bin\pg_ctl.exe   -D D:\pgdata -l D:\pgdata\server.log start
+D:\pgsql\bin\createdb.exe -h 127.0.0.1 -U coding coding_agent
+D:\pgsql\bin\psql.exe     -h 127.0.0.1 -U coding -d coding_agent `
+  -c "CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+
+# Redis (Redis-compatible service on :6379)
+winget install --id Memurai.MemuraiDeveloper -e --source winget
+
+# Migrate and run
+.venv\Scripts\python.exe -m alembic upgrade head
+.venv\Scripts\python.exe -m uvicorn app.gateway.main:app --host 127.0.0.1 --port 8000
+```
+
+Connection strings are unchanged and env-driven
+(`DATABASE_URL=postgresql+asyncpg://coding:coding@localhost:5432/coding_agent`,
+`REDIS_URL=redis://localhost:6379/0`). `pg_ctl` must be re-run after a reboot;
+the Memurai service starts automatically.
+
+**Switching to Docker later.** After rebooting to activate WSL2, install Docker
+Engine inside an Ubuntu WSL distro and run `docker compose up -d --wait` from the
+repo root. Install the distro onto a data drive so Docker's data root lives
+there, e.g. `wsl --install -d Ubuntu-24.04 --location D:\WSL\Ubuntu-24.04`. The
+compose services publish `5432`/`6379`, which collide with the native
+PostgreSQL/Memurai — stop those first, or override `POSTGRES_PORT`/`REDIS_PORT`.
+
 ### First API Use
 
 ```bash
